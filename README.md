@@ -4,6 +4,10 @@ IdeaMiner is a local-first research idea manager built with React, TypeScript, F
 
 Your SQLite database is the canonical source of truth. The core application runs locally and does not require an account, cloud database, or API key.
 
+![IdeaMiner overview showing projects, filters, tags, stages, and research idea cards](docs/ideaminer-overview.png)
+
+_A privacy-safe example library. Your own ideas remain in the SQLite database beside your local installation._
+
 ## Features
 
 - Idea CRUD with immutable original captures and editable Markdown/LaTeX notes
