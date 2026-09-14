@@ -1,0 +1,4 @@
+interface:
+  display_name: "IdeaMiner"
+  short_description: "Store, find, link, and develop research ideas"
+  default_prompt: "Use IdeaMiner to help me capture or develop this research idea."

@@ -1,0 +1,28 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# Personal IdeaMiner state. Keep the directory, never the library contents.
+data/*
+!data/.gitkeep
+*.db
+*.db-*
+
+# Credentials and local configuration.
+.env
+.env.*
+!.env.example
+
+# Editor, OS, and runtime files.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
