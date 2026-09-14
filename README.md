@@ -94,6 +94,16 @@ OpenAI and DeepSeek presets are included. A custom provider must expose an OpenA
 
 Original `raw_text` captures are excluded from online Agent context. Selected working notes and explicitly selected compatible local files may be sent to the configured provider for a run.
 
+### Advanced agent workflows
+
+- **Grow an idea without overwriting its history:** open an idea, run **Elaborate**, and choose **Save as new**. The result becomes a child in the same project with a `develops-into` relation; choose **Update original** only when the response should replace the current working version.
+- **Discover and record connections:** run the Agent in **Connect** mode over all ideas, one project, or a project group. It can propose typed relations with explanations; apply only the useful proposals so the graph—not a fragile reference such as “Idea #4”—remains the source of truth.
+- **Dream across boundaries:** drag two to eight cards, even from different projects, into the **Dream** tray. Add an optional prompt such as “combine these into a testable study,” choose a destination project, and review the proposed descendants. Accepted results receive the `dreams` tag and `inspired-by` links to every source card.
+- **Stress-test before committing:** use **Critique** to expose assumptions and missing evidence, or **Synthesize** to turn a cluster of ideas into a coherent direction. Agent-created ideas, edits, and relations remain proposals until you accept them.
+- **Follow the idea track:** use **Lineage** for parent-to-descendant development, **Graph** for wider conceptual links, and stages plus the weekly **Review** to decide which branches should advance, pause, or reconnect.
+
+Example: elaborate a broad hypothesis into separate modeling and evaluation children, connect the evaluation branch to a calibration idea from another project, then Dream those cards into a new experiment. The resulting idea retains visible links to its sources, so months later you can still reconstruct why it exists.
+
 ## Everyday workflow
 
 - Create a project, or use `random_chat` for temporary captures.
