@@ -8,6 +8,16 @@ Your SQLite database is the canonical source of truth. The core application runs
 
 _A privacy-safe example library. Your own ideas remain in the SQLite database beside your local installation._
 
+## When IdeaMiner earns its place
+
+- **A promising thought arrives before the project exists.** Capture it in `random_chat`; IdeaMiner preserves the original wording while you later refine it, tag it, and move it into a research project.
+- **One hypothesis keeps branching.** Turn alternatives, experiments, evidence, and objections into linked descendant ideas, then use Lineage view to see how the reasoning evolved instead of losing it in a long document.
+- **The interesting connection crosses project boundaries.** Drag several cards into Dream, add an optional question, and use an agent to propose a new synthesis while keeping every source idea traceable.
+- **Your research must remain local.** Keep the canonical library in SQLite, reference nearby papers or code by file path without copying their contents, and write notes with Markdown and LaTeX.
+- **A collaborator wants to build on your thinking.** Export a project as JSON so they can import and integrate its ideas and relations, or export readable Markdown for discussion.
+
+For example: capture “Could prediction change with temporal scale?”, grow separate children for modeling, evaluation, and counterarguments, attach the relevant paper paths, and let the weekly review bring the most promising unfinished branch back into focus.
+
 ## Features
 
 - Idea CRUD with immutable original captures and editable Markdown/LaTeX notes
