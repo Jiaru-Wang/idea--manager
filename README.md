@@ -155,3 +155,7 @@ Useful local addresses:
 - **Dependency installation failed:** confirm internet access, delete the incomplete `.venv` or `node_modules`, and run the launcher again.
 - **A port is already in use:** quit any older IdeaMiner process using ports 8000 or 5173.
 - **The browser did not open:** wait for the launcher to report readiness, then visit `http://127.0.0.1:5173` manually.
+
+## License
+
+Copyright 2026 Dongyang Kuang. Licensed under the [Apache License 2.0](LICENSE).
