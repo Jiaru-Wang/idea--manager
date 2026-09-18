@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field, SecretStr, field_validator
 
 
 Status = Literal["seed", "exploring", "promising", "parked"]
+AgentProvider = Literal["openai", "anthropic", "deepseek", "qwen", "local", "custom"]
+ReasoningEffort = Literal["", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 class IdeaCreate(BaseModel):
@@ -82,6 +84,7 @@ class AgentRunRequest(BaseModel):
     scope_id: int | None = None
     idea_id: int | None = None
     model: str = Field(default="", max_length=100)
+    reasoning_effort: ReasoningEffort = ""
     web_search: bool = False
     attachment_ids: list[int] = []
 
@@ -187,10 +190,12 @@ class TagBulkUpdate(BaseModel):
 
 
 class AgentConnectionCreate(BaseModel):
-    provider: Literal["openai", "deepseek", "custom"] = "openai"
+    provider: AgentProvider = "openai"
     api_key: SecretStr = SecretStr("")
     model: str = Field(default="", max_length=100)
     base_url: str = Field(default="", max_length=500)
+    reasoning_effort: ReasoningEffort = ""
+    remember_api_key: bool = False
 
     @field_validator("model", "base_url")
     @classmethod

@@ -18,6 +18,7 @@ data/*
 .env
 .env.*
 !.env.example
+agent-profiles.json
 
 # Editor, OS, and runtime files.
 .vscode/
@@ -25,4 +26,3 @@ data/*
 .DS_Store
 Thumbs.db
 *.log
-

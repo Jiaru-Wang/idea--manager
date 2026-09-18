@@ -88,6 +88,65 @@ def test_deepseek_responses_provider(monkeypatch):
         client.delete("/api/agent/config")
 
 
+def test_anthropic_messages_provider(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"content": [{"type": "tool_use", "name": "submit_research_result", "input": {"answer": "# Claude synthesis\n\nA structured result.", "proposals": []}}]}
+
+    class FakeClient:
+        def __init__(self, **_): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): pass
+        async def post(self, url, headers, json):
+            captured.update({"url": url, "headers": headers, "body": json})
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.app.main.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        configured = client.post("/api/agent/config", json={
+            "provider": "anthropic", "api_key": "anthropic-test-key", "model": "claude-sonnet-5",
+            "reasoning_effort": "high", "remember_api_key": False,
+        })
+        assert configured.status_code == 200
+        result = client.post("/api/agent/runs", json={"prompt": "Synthesize", "mode": "synthesize", "scope_type": "all"})
+        assert result.status_code == 200
+        assert result.json()["provider"] == "anthropic"
+        assert captured["url"] == "https://api.anthropic.com/v1/messages"
+        assert captured["headers"]["x-api-key"] == "anthropic-test-key"
+        assert captured["body"]["thinking"] == {"type": "adaptive"}
+        assert captured["body"]["output_config"] == {"effort": "high"}
+        assert captured["body"]["tools"][0]["input_schema"]["required"] == ["answer", "proposals"]
+        client.delete("/api/agent/config/anthropic")
+
+
+def test_multiple_agent_profiles_switch_without_retyping_keys():
+    with TestClient(app) as client:
+        assert client.post("/api/agent/config", json={
+            "provider": "openai", "api_key": "openai-test-key", "model": "gpt-5.6-terra",
+            "reasoning_effort": "low", "remember_api_key": False,
+        }).status_code == 200
+        assert client.post("/api/agent/config", json={
+            "provider": "local", "api_key": "", "model": "local-research-model",
+            "base_url": "http://127.0.0.1:11434/v1", "reasoning_effort": "none",
+        }).status_code == 200
+        switched = client.post("/api/agent/activate/openai").json()
+        assert switched["provider"] == "openai"
+        assert switched["configured"] is True
+        assert switched["default_model"] == "gpt-5.6-terra"
+        profiles = {item["id"]: item for item in switched["providers"]}
+        assert profiles["openai"]["configured"] is True
+        assert profiles["local"]["configured"] is True
+        assert profiles["openai"]["reasoning_effort"] == "low"
+        client.delete("/api/agent/config/openai")
+        client.delete("/api/agent/config/local")
+
+
 def test_core_workflow():
     with TestClient(app) as client:
         agent_status = client.get("/api/agent/status").json()

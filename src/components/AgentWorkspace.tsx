@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Check, FileText, GitBranch, Globe2, KeyRound, LoaderCircle, Paperclip, Save, ShieldCheck, Sparkles, X } from 'lucide-react'
 import { api } from '../api'
 import { IdeaMarkdown } from './IdeaMarkdown'
-import type { AgentMode, AgentProposal, AgentProvider, AgentRunResult, AgentRunSaveResult, AgentStatus, Attachment, Idea, Project, ProjectGroup } from '../types'
+import type { AgentMode, AgentProposal, AgentProvider, AgentProviderOption, AgentRunResult, AgentRunSaveResult, AgentStatus, Attachment, Idea, Project, ProjectGroup, ReasoningEffort } from '../types'
 
 type Scope = { type: 'all' } | { type: 'project'; id: number } | { type: 'group'; id: number }
 
@@ -37,8 +37,11 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
   const [model, setModel] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [provider, setProvider] = useState<AgentProvider>('openai')
-  const [connectionModel, setConnectionModel] = useState('gpt-5.4-mini')
+  const [connectionModel, setConnectionModel] = useState('gpt-5.6-luna')
   const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1')
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('medium')
+  const [connectionReasoningEffort, setConnectionReasoningEffort] = useState<ReasoningEffort>('medium')
+  const [rememberApiKey, setRememberApiKey] = useState(true)
   const [editingConnection, setEditingConnection] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [webSearch, setWebSearch] = useState(false)
@@ -55,6 +58,8 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
     api.agentStatus().then(value => {
       setStatus(value); setProvider(value.provider); setModel(value.default_model)
       setConnectionModel(value.default_model); setBaseUrl(value.base_url)
+      setReasoningEffort(value.reasoning_effort); setConnectionReasoningEffort(value.reasoning_effort)
+      setRememberApiKey(value.credential_store_available)
     }).catch(error => setError(error instanceof Error ? error.message : 'Could not inspect agent configuration'))
   }, [])
 
@@ -73,20 +78,29 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
     return 'All active ideas (up to 40 recent ideas)'
   }, [contextIdea, groups, projects, scope])
 
+  const activeProfile = status?.providers.find(item => item.id === provider) ?? null
+  const keyReady = Boolean(apiKey.trim() || activeProfile?.configured || !activeProfile?.api_key_required)
+
   function chooseMode(next: AgentMode) {
     setMode(next)
     setPrompt(modes.find(item => item.id === next)?.prompt ?? '')
   }
 
-  function chooseProvider(next: AgentProvider) {
-    setProvider(next)
-    const option = status?.providers.find(item => item.id === next)
-    if (option) {
-      setConnectionModel(option.default_model)
-      setBaseUrl(option.default_base_url)
-      if (!option.web_search_supported) setWebSearch(false)
-    }
-    setApiKey('')
+  function loadProfile(option: AgentProviderOption, nextStatus?: AgentStatus) {
+    setProvider(option.id); setConnectionModel(option.model); setBaseUrl(option.base_url)
+    setConnectionReasoningEffort(option.reasoning_effort); setModel(option.model); setReasoningEffort(option.reasoning_effort)
+    setApiKey(''); setEditingConnection(!option.configured)
+    if (!option.web_search_supported) setWebSearch(false)
+    if (nextStatus) setStatus(nextStatus)
+  }
+
+  async function chooseProvider(next: AgentProvider) {
+    setError('')
+    try {
+      const nextStatus = await api.activateAgentProvider(next)
+      const option = nextStatus.providers.find(item => item.id === next)
+      if (option) loadProfile(option, nextStatus)
+    } catch (error) { setError(error instanceof Error ? error.message : 'Could not switch providers') }
   }
 
   async function run() {
@@ -95,7 +109,7 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
     try {
       const next = await api.runAgent({
         prompt, mode, scope_type: scope.type, scope_id: scope.type === 'all' ? null : scope.id,
-        idea_id: contextIdea?.id ?? null, model, web_search: webSearch, attachment_ids: selectedFileIds,
+        idea_id: contextIdea?.id ?? null, model, reasoning_effort: reasoningEffort, web_search: webSearch, attachment_ids: selectedFileIds,
       })
       setResult(next); setResultMode(mode)
     } catch (error) {
@@ -104,20 +118,22 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
   }
 
   async function connect() {
-    if ((provider !== 'custom' && !apiKey.trim()) || !connectionModel.trim() || !baseUrl.trim()) return
+    const profile = status?.providers.find(item => item.id === provider)
+    if ((profile?.api_key_required && !apiKey.trim() && !profile.configured) || !connectionModel.trim() || !baseUrl.trim()) return
     setConnecting(true); setError('')
     try {
-      const next = await api.configureAgent({ provider, api_key: apiKey, model: connectionModel, base_url: baseUrl })
-      setApiKey(''); setStatus(next); setProvider(next.provider); setModel(next.default_model); setBaseUrl(next.base_url); setEditingConnection(false)
-    } catch (error) { setError(error instanceof Error ? error.message : 'Could not save the connection for this session') }
+      const next = await api.configureAgent({ provider, api_key: apiKey, model: connectionModel, base_url: baseUrl, reasoning_effort: connectionReasoningEffort, remember_api_key: rememberApiKey })
+      setApiKey(''); setStatus(next); setProvider(next.provider); setModel(next.default_model); setReasoningEffort(next.reasoning_effort); setBaseUrl(next.base_url); setEditingConnection(false)
+    } catch (error) { setError(error instanceof Error ? error.message : 'Could not save the connection') }
     finally { setConnecting(false) }
   }
 
   async function forgetConnection() {
     try {
-      const next = await api.clearAgentConfig()
-      setStatus(next); setEditingConnection(!next.configured)
-    } catch (error) { setError(error instanceof Error ? error.message : 'Could not clear the session connection') }
+      const next = await api.forgetAgentProfile(provider)
+      const option = next.providers.find(item => item.id === provider)
+      if (option) loadProfile(option, next)
+    } catch (error) { setError(error instanceof Error ? error.message : 'Could not forget this provider profile') }
   }
 
   async function resolve(proposal: AgentProposal, action: 'apply' | 'dismiss') {
@@ -143,23 +159,24 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
     <section className="agent-workspace">
       <header><div><p className="eyebrow">RESEARCH AGENT</p><h2><Sparkles size={25}/> Agent Workspace</h2></div><button className="icon-button" onClick={onClose}><X size={20}/></button></header>
       {!status ? <div className="agent-loading"><LoaderCircle className="spin" size={20}/> Checking provider…</div> : <>
+        <nav className="agent-provider-tabs" aria-label="Agent providers">{status.providers.map(item => <button key={item.id} className={provider === item.id ? 'active' : ''} onClick={() => void chooseProvider(item.id)}><span>{item.label}</span><i className={item.configured ? 'ready' : ''}/></button>)}</nav>
         {(!status.configured || editingConnection) ? <div className="agent-setup agent-connection-form">
-          <KeyRound size={22}/><div><strong>Connect an AI provider</strong><p>Choose a preset or enter a Responses-compatible endpoint. Credentials are held only in the local backend's memory until IdeaMiner stops.</p>
-            <label>Provider<select value={provider} onChange={event => chooseProvider(event.target.value as AgentProvider)}>{status.providers.map(item => <option value={item.id} key={item.id}>{item.label}</option>)}</select></label>
-            <label>API key {provider === 'custom' && <span>optional</span>}<input type="password" autoComplete="new-password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={provider === 'deepseek' ? 'DeepSeek API key' : provider === 'custom' ? 'Bearer token, if required' : 'OpenAI API key'}/></label>
-            <label>Model<input value={connectionModel} onChange={event => setConnectionModel(event.target.value)} placeholder="gpt-5.4-mini"/></label>
+          <KeyRound size={22}/><div><strong>{activeProfile?.label} profile</strong><p>Each tab keeps its own endpoint, model, reasoning level, and credential. Switching tabs restores that provider automatically.</p>
+            <label>API key {!activeProfile?.api_key_required && <span>optional</span>}<input type="password" autoComplete="new-password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={activeProfile?.credential_stored ? 'Saved securely — leave blank to keep it' : activeProfile?.api_key_required ? `${activeProfile.label} API key` : 'Bearer token, if your local server requires one'}/></label>
+            <label>Model{activeProfile?.models.length ? <select value={connectionModel} onChange={event => setConnectionModel(event.target.value)}>{!activeProfile.models.includes(connectionModel) && <option value={connectionModel}>{connectionModel}</option>}{activeProfile.models.map(item => <option value={item} key={item}>{item}</option>)}</select> : <input value={connectionModel} onChange={event => setConnectionModel(event.target.value)} placeholder="Local model name"/>}</label>
+            <label>Thinking effort<select value={connectionReasoningEffort} onChange={event => setConnectionReasoningEffort(event.target.value as ReasoningEffort)}>{activeProfile?.reasoning_efforts.map(item => <option value={item} key={item}>{item === 'none' ? 'None / fastest' : item}</option>)}</select></label>
             <label>Base URL<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1"/></label>
-            <p className="agent-provider-note">IdeaMiner appends <code>/responses</code> unless the URL already ends with it. DeepSeek and OpenAI presets support structured proposals and web search.</p>
-            <div className="agent-connect-actions">{status.configured && <button className="button secondary small" onClick={() => setEditingConnection(false)}>Cancel</button>}<button className="button primary small" disabled={connecting || (provider !== 'custom' && !apiKey.trim()) || !connectionModel.trim() || !baseUrl.trim()} onClick={connect}>{connecting ? <LoaderCircle className="spin" size={15}/> : <KeyRound size={15}/>} Use for this session</button></div>
-            <small><ShieldCheck size={13}/> Not saved to SQLite, browser storage, files, or exports. The first agent run verifies the credentials with the selected provider.</small>
-            <details><summary>Optional persistent setup</summary><code>{provider === 'deepseek' ? 'setx IDEAMINER_AGENT_PROVIDER "deepseek"\nsetx DEEPSEEK_API_KEY "your-api-key"' : provider === 'custom' ? 'setx IDEAMINER_AGENT_PROVIDER "custom"\nsetx IDEAMINER_AGENT_BASE_URL "https://your-endpoint/v1"\nsetx IDEAMINER_AGENT_MODEL "your-model"' : 'setx IDEAMINER_AGENT_PROVIDER "openai"\nsetx OPENAI_API_KEY "your-api-key"'}</code><p>Restart IdeaMiner after setting environment variables.</p></details>
-          </div></div> : <div className="agent-connected"><ShieldCheck size={18}/><div><strong>{status.provider_label} connected</strong><span>{status.default_model} · {status.configuration_source === 'session' ? 'this session only' : 'environment variable'}</span><small>{status.base_url}</small></div><button onClick={() => setEditingConnection(true)}>Change</button>{status.configuration_source === 'session' && <button onClick={forgetConnection}>Forget</button>}</div>}
+            <p className="agent-provider-note">IdeaMiner uses Anthropic Messages for Anthropic and an OpenAI-compatible Responses endpoint for the other tabs. A local server normally uses <code>http://127.0.0.1:11434/v1</code>.</p>
+            <label className="agent-remember"><input type="checkbox" checked={rememberApiKey} disabled={!status.credential_store_available || !apiKey.trim() && !activeProfile?.credential_stored} onChange={event => setRememberApiKey(event.target.checked)}/> Remember this credential in the operating system vault</label>
+            <div className="agent-connect-actions">{status.configured && <button className="button secondary small" onClick={() => setEditingConnection(false)}>Cancel</button>}<button className="button primary small" disabled={connecting || !keyReady || !connectionModel.trim() || !baseUrl.trim()} onClick={connect}>{connecting ? <LoaderCircle className="spin" size={15}/> : <KeyRound size={15}/>} Save profile</button></div>
+            <small><ShieldCheck size={13}/> Keys are never stored in SQLite, browser storage, exports, or the profile file. {!status.credential_store_available && 'Secure OS storage is unavailable, so new keys remain session-only.'}</small>
+          </div></div> : <div className="agent-connected"><ShieldCheck size={18}/><div><strong>{status.provider_label} ready</strong><span>{status.default_model} · {status.reasoning_effort} effort · {status.configuration_source === 'secure_storage' ? 'credential remembered' : status.configuration_source === 'session' ? 'session credential' : status.configuration_source === 'environment' ? 'environment credential' : 'local endpoint'}</span><small>{status.base_url}</small></div><button onClick={() => setEditingConnection(true)}>Edit</button><button onClick={() => void forgetConnection()}>Forget</button></div>}
         {status.configured && <>
         <div className="agent-context"><span>Context</span><strong>{contextName}</strong><small>{status.privacy}</small></div>
         <div className="agent-modes">{modes.map(item => <button key={item.id} className={mode === item.id ? 'active' : ''} onClick={() => chooseMode(item.id)}>{item.label}</button>)}</div>
         {availableFiles.length > 0 && <details className="agent-files"><summary><Paperclip size={14}/> Include local files <span>{selectedFileIds.length ? `${selectedFileIds.length} selected` : 'none selected'}</span></summary><p>Only checked text files are sent to the provider for this run. Their stable ID and local path are included; binary files contribute metadata only.</p><div>{availableFiles.map(file => <label className={file.exists ? '' : 'missing'} key={file.id}><input type="checkbox" disabled={!file.exists} checked={selectedFileIds.includes(file.id)} onChange={event => setSelectedFileIds(current => event.target.checked ? [...current, file.id] : current.filter(id => id !== file.id))}/><FileText size={14}/><span>{file.display_name}<small title={file.absolute_path}>{file.absolute_path}</small><small>{file.storage_mode === 'managed' ? 'managed copy' : 'linked original'}{!file.exists && ' · missing'}</small></span></label>)}</div></details>}
         <textarea className="agent-prompt" rows={5} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="What should the research agent investigate?"/>
-        <div className="agent-options"><label title={status.web_search_supported ? `Use ${status.provider_label}'s server-side web search` : 'This provider preset does not advertise web search'}><input type="checkbox" checked={webSearch} disabled={!status.web_search_supported} onChange={event => setWebSearch(event.target.checked)}/><Globe2 size={15}/> Allow {status.provider_label} web search</label><label>Model <input value={model} onChange={event => setModel(event.target.value)} /></label></div>
+        <div className="agent-options"><label title={status.web_search_supported ? `Use ${status.provider_label}'s server-side web search` : 'This provider preset does not advertise web search'}><input type="checkbox" checked={webSearch} disabled={!status.web_search_supported} onChange={event => setWebSearch(event.target.checked)}/><Globe2 size={15}/> Allow {status.provider_label} web search</label><label>Model {activeProfile?.models.length ? <select value={model} onChange={event => setModel(event.target.value)}>{!activeProfile.models.includes(model) && <option value={model}>{model}</option>}{activeProfile.models.map(item => <option value={item} key={item}>{item}</option>)}</select> : <input value={model} onChange={event => setModel(event.target.value)} />}</label><label>Thinking <select value={reasoningEffort} onChange={event => setReasoningEffort(event.target.value as ReasoningEffort)}>{activeProfile?.reasoning_efforts.map(item => <option value={item} key={item}>{item}</option>)}</select></label></div>
         <button className="button primary agent-run" disabled={running || !prompt.trim()} onClick={run}>{running ? <><LoaderCircle className="spin" size={17}/> Researching…</> : <><Sparkles size={17}/> Run agent</>}</button>
         </>}
       </>}

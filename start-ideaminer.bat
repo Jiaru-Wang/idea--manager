@@ -28,7 +28,7 @@ python -m venv .venv
 if not exist ".venv\Scripts\python.exe" goto setup_failed
 
 :python_ready
-".venv\Scripts\python.exe" -c "import fastapi, uvicorn, mcp" >nul 2>&1
+".venv\Scripts\python.exe" -c "import fastapi, uvicorn, mcp, keyring" >nul 2>&1
 if not errorlevel 1 goto frontend_ready
 
 echo  Installing Python packages...

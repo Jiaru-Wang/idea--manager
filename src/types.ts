@@ -73,13 +73,23 @@ export interface TagMapData {
 }
 
 export type AgentMode = 'explore' | 'elaborate' | 'critique' | 'connect' | 'synthesize'
-export type AgentProvider = 'openai' | 'deepseek' | 'custom'
+export type AgentProvider = 'openai' | 'anthropic' | 'deepseek' | 'qwen' | 'local'
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface AgentProviderOption {
   id: AgentProvider
   label: string
+  configured: boolean
+  configuration_source: 'session' | 'secure_storage' | 'environment' | 'none'
+  credential_stored: boolean
+  model: string
+  base_url: string
+  reasoning_effort: ReasoningEffort
+  models: string[]
+  reasoning_efforts: ReasoningEffort[]
   default_model: string
   default_base_url: string
+  api_key_required: boolean
   web_search_supported: boolean
 }
 
@@ -87,11 +97,13 @@ export interface AgentStatus {
   provider: AgentProvider
   provider_label: string
   configured: boolean
-  configuration_source: 'session' | 'environment' | 'none'
+  configuration_source: 'session' | 'secure_storage' | 'environment' | 'none'
   default_model: string
   base_url: string
+  reasoning_effort: ReasoningEffort
   web_search_supported: boolean
   providers: AgentProviderOption[]
+  credential_store_available: boolean
   capabilities: string[]
   privacy: string
 }

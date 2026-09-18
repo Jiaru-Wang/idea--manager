@@ -27,7 +27,7 @@ For example: capture “Could prediction change with temporal scale?”, grow se
 - Local-file references that store paths and metadata without embedding file contents
 - JSON import/export and Markdown export
 - Weekly review, local semantic discovery, and cross-project Dream synthesis
-- Optional Agent workspace for OpenAI, DeepSeek, or compatible Responses APIs
+- Optional Agent workspace with separate OpenAI, Anthropic, DeepSeek, Qwen, and local profiles
 - Optional MCP bridge for using the same library from Codex
 
 ## Quick start on Windows
@@ -88,9 +88,11 @@ For backups, stop IdeaMiner and copy `data/ideaminer.db` somewhere safe. For sha
 
 ## Agent connections
 
-The application works fully without an LLM. To use the optional Agent or Dream tools, open **Agent** and enter the provider, key, model, and base URL. Session credentials remain only in the backend process memory and disappear when IdeaMiner quits.
+The application works fully without an LLM. To use the optional Agent or Dream tools, open **Agent** and choose the **OpenAI**, **Anthropic**, **DeepSeek**, **Qwen**, or **Local** tab. Enter the key once, choose a model and thinking effort, leave **Remember this credential in the operating system vault** checked, and save the profile.
 
-OpenAI and DeepSeek presets are included. A custom provider must expose an OpenAI-compatible Responses API. The included `.env.example` is a reference list only; IdeaMiner does not automatically load it. Set persistent values in your shell or operating-system environment, or continue using the safer in-app session form.
+Each provider keeps its own endpoint, model, thinking effort, and credential, so switching tabs does not require retyping keys. Secrets live in the current operating-system user's credential vault—not SQLite, browser storage, the profile file, backups, or exports. Non-secret profile choices are stored beside the database. **Forget saved profile** removes one provider's saved settings and credential. The Local tab supports OpenAI-compatible Responses endpoints and an optional key.
+
+The included `.env.example` is a reference list for unattended or portable configuration; IdeaMiner does not automatically load it. You can set those values in your shell or operating-system environment instead of saving an in-app profile.
 
 Original `raw_text` captures are excluded from online Agent context. Selected working notes and explicitly selected compatible local files may be sent to the configured provider for a run.
 

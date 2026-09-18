@@ -19,6 +19,7 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from .agent_profiles import CredentialStoreError, credential_store_available, delete_api_key, get_api_key, load_store, reset_profile, save_api_key, save_profile, set_active_provider
 from .database import db, init_db
 from .schemas import AgentConnectionCreate, AgentProposalResolution, AgentResultSave, AgentRunRequest, AttachmentCreate, CodexCheckpointCreate, DreamRunRequest, ImportPreviewRequest, ImportRequest, IdeaCreate, IdeaUpdate, PathChoice, ProjectAssignment, ProjectCreate, ProjectGroupCreate, RelationCreate, TagBulkUpdate, TagMerge, TagRename, TagSettingsUpdate
 from .semantic import DIMENSIONS as SEMANTIC_DIMENSIONS, MODEL as SEMANTIC_MODEL, rebuild as rebuild_semantic_index, similarity as semantic_similarity
@@ -119,16 +120,38 @@ AGENT_MODES = {
 
 AGENT_PROVIDERS: dict[str, dict[str, Any]] = {
     "openai": {
-        "label": "OpenAI", "base_url": "https://api.openai.com/v1", "model": "gpt-5.4-mini",
+        "label": "OpenAI", "base_url": "https://api.openai.com/v1", "model": "gpt-5.6-luna",
+        "models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+        "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+        "default_effort": "medium", "api_style": "responses", "api_key_required": True,
         "key_env": "OPENAI_API_KEY", "model_env": "IDEAMINER_OPENAI_MODEL", "web_search": True,
     },
+    "anthropic": {
+        "label": "Anthropic", "base_url": "https://api.anthropic.com/v1", "model": "claude-sonnet-5",
+        "models": ["claude-sonnet-5", "claude-opus-5"],
+        "reasoning_efforts": ["none", "low", "medium", "high", "max"],
+        "default_effort": "medium", "api_style": "anthropic", "api_key_required": True,
+        "key_env": "ANTHROPIC_API_KEY", "model_env": "IDEAMINER_ANTHROPIC_MODEL", "web_search": False,
+    },
     "deepseek": {
-        "label": "DeepSeek", "base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash",
+        "label": "DeepSeek", "base_url": "https://api.deepseek.com", "model": "deepseek-flash",
+        "models": ["deepseek-flash", "deepseek-v4-pro"],
+        "reasoning_efforts": ["none", "low", "high", "max"],
+        "default_effort": "none", "api_style": "responses", "api_key_required": True,
         "key_env": "DEEPSEEK_API_KEY", "model_env": "IDEAMINER_DEEPSEEK_MODEL", "web_search": True,
     },
-    "custom": {
-        "label": "Custom Responses API", "base_url": "", "model": "",
-        "key_env": "IDEAMINER_AGENT_API_KEY", "model_env": "IDEAMINER_AGENT_MODEL", "web_search": False,
+    "qwen": {
+        "label": "Qwen", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen3.8-flash",
+        "models": ["qwen3.8-flash", "qwen3.8-max", "qwen3.7-plus"],
+        "reasoning_efforts": ["none", "low", "medium", "xhigh"],
+        "default_effort": "medium", "api_style": "responses", "api_key_required": True,
+        "key_env": "DASHSCOPE_API_KEY", "model_env": "IDEAMINER_QWEN_MODEL", "web_search": False,
+    },
+    "local": {
+        "label": "Local", "base_url": "http://127.0.0.1:11434/v1", "model": "gpt-oss:20b",
+        "models": [], "reasoning_efforts": ["none"], "default_effort": "none",
+        "api_style": "responses", "api_key_required": False,
+        "key_env": "IDEAMINER_LOCAL_API_KEY", "model_env": "IDEAMINER_LOCAL_MODEL", "web_search": False,
     },
 }
 
@@ -138,26 +161,43 @@ def _valid_base_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and not parsed.username and not parsed.password
 
 
-def _active_agent_config() -> dict[str, Any]:
-    session = getattr(app.state, "agent_config", {})
-    if session:
-        provider = str(session.get("provider", "openai"))
-        definition = AGENT_PROVIDERS.get(provider, AGENT_PROVIDERS["openai"])
-        return {**session, "label": definition["label"], "web_search": definition["web_search"], "source": "session", "configured": True}
-
-    requested_provider = os.environ.get("IDEAMINER_AGENT_PROVIDER", "").strip().lower()
+def _agent_config_for(requested_provider: str) -> dict[str, Any]:
+    store = load_store()
+    if requested_provider == "custom":
+        requested_provider = "local"
     if requested_provider not in AGENT_PROVIDERS:
-        requested_provider = "deepseek" if os.environ.get("DEEPSEEK_API_KEY", "").strip() and not os.environ.get("OPENAI_API_KEY", "").strip() else "openai"
+        requested_provider = "openai"
     definition = AGENT_PROVIDERS[requested_provider]
-    api_key = os.environ.get(str(definition["key_env"]), "").strip()
-    model = os.environ.get("IDEAMINER_AGENT_MODEL", "").strip() or os.environ.get(str(definition["model_env"]), "").strip() or str(definition["model"])
-    base_url = os.environ.get("IDEAMINER_AGENT_BASE_URL", "").strip() or str(definition["base_url"])
-    configured = bool(model and base_url and (api_key or requested_provider == "custom"))
+    session = getattr(app.state, "agent_configs", {}).get(requested_provider, {})
+    saved = store.get("profiles", {}).get(requested_provider, {})
+    api_key = str(session.get("api_key", "")).strip()
+    source = "session" if api_key else "none"
+    if not api_key:
+        api_key = get_api_key(requested_provider).strip()
+        source = "secure_storage" if api_key else "none"
+    if not api_key:
+        api_key = os.environ.get(str(definition["key_env"]), "").strip()
+        source = "environment" if api_key else "none"
+    model = str(session.get("model") or saved.get("model") or os.environ.get(str(definition["model_env"]), "").strip() or definition["model"])
+    base_url = str(session.get("base_url") or saved.get("base_url") or (os.environ.get("IDEAMINER_AGENT_BASE_URL", "").strip() if requested_provider == os.environ.get("IDEAMINER_AGENT_PROVIDER", "").strip().lower() else "") or definition["base_url"])
+    reasoning_effort = str(session.get("reasoning_effort") or saved.get("reasoning_effort") or definition["default_effort"])
+    key_required = bool(definition["api_key_required"])
+    local_explicit = bool(session or saved or os.environ.get("IDEAMINER_LOCAL_MODEL", "").strip() or os.environ.get("IDEAMINER_AGENT_PROVIDER", "").strip().lower() == "local")
+    configured = bool(model and base_url and (api_key or not key_required) and (requested_provider != "local" or local_explicit))
     return {
         "provider": requested_provider, "label": definition["label"], "api_key": api_key,
-        "model": model, "base_url": base_url, "web_search": definition["web_search"],
-        "source": "environment" if configured else "none", "configured": configured,
+        "model": model, "base_url": base_url, "reasoning_effort": reasoning_effort,
+        "web_search": definition["web_search"], "api_style": definition["api_style"],
+        "source": source if configured else "none", "configured": configured,
     }
+
+
+def _active_agent_config() -> dict[str, Any]:
+    store = load_store()
+    requested_provider = str(getattr(app.state, "active_agent_provider", "") or store.get("active_provider") or os.environ.get("IDEAMINER_AGENT_PROVIDER", "")).strip().lower()
+    if requested_provider not in AGENT_PROVIDERS and requested_provider != "custom":
+        requested_provider = "deepseek" if os.environ.get("DEEPSEEK_API_KEY", "").strip() and not os.environ.get("OPENAI_API_KEY", "").strip() else "openai"
+    return _agent_config_for(requested_provider)
 
 
 def _agent_context(connection: sqlite3.Connection, payload: AgentRunRequest) -> dict[str, Any]:
@@ -300,14 +340,106 @@ def _agent_tool() -> dict[str, Any]:
     }
 
 
+def _response_result(result: dict[str, Any], provider_label: str) -> tuple[str, list[dict[str, Any]]]:
+    text_parts: list[str] = []
+    for item in result.get("output", []):
+        if item.get("type") == "function_call" and item.get("name") == "submit_research_result":
+            try:
+                arguments = item.get("arguments", {})
+                structured = json.loads(arguments) if isinstance(arguments, str) else arguments
+                proposals = structured.get("proposals", [])
+                return str(structured.get("answer", "")), proposals[:5] if isinstance(proposals, list) else []
+            except (AttributeError, TypeError, ValueError) as error:
+                raise HTTPException(502, f"{provider_label} returned an unreadable structured result") from error
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                if content.get("type") in {"output_text", "text"} and content.get("text"):
+                    text_parts.append(str(content["text"]))
+    if result.get("output_text"):
+        text_parts.append(str(result["output_text"]))
+    if text_parts:
+        return "\n\n".join(text_parts), []
+    raise HTTPException(502, f"{provider_label} did not return a readable research result")
+
+
+def _anthropic_result(result: dict[str, Any], provider_label: str) -> tuple[str, list[dict[str, Any]]]:
+    text_parts: list[str] = []
+    for item in result.get("content", []):
+        if item.get("type") == "tool_use" and item.get("name") == "submit_research_result":
+            structured = item.get("input", {})
+            if not isinstance(structured, dict):
+                raise HTTPException(502, f"{provider_label} returned an unreadable structured result")
+            proposals = structured.get("proposals", [])
+            return str(structured.get("answer", "")), proposals[:5] if isinstance(proposals, list) else []
+        if item.get("type") == "text" and item.get("text"):
+            text_parts.append(str(item["text"]))
+    if text_parts:
+        return "\n\n".join(text_parts), []
+    raise HTTPException(502, f"{provider_label} did not return a readable research result")
+
+
+async def _call_agent_provider(config: dict[str, Any], *, model: str, reasoning_effort: str, instructions: str, input_text: str, web_search: bool = False) -> tuple[str, list[dict[str, Any]]]:
+    provider, provider_label = str(config["provider"]), str(config["label"])
+    api_key = str(config.get("api_key", "")).strip()
+    endpoint = str(config["base_url"]).rstrip("/")
+    headers = {"Content-Type": "application/json"}
+    if config["api_style"] == "anthropic":
+        if not endpoint.endswith("/messages"):
+            endpoint += "/messages"
+        headers.update({"x-api-key": api_key, "anthropic-version": "2023-06-01"})
+        tool = _agent_tool()
+        body: dict[str, Any] = {
+            "model": model, "max_tokens": 8192, "system": instructions,
+            "messages": [{"role": "user", "content": input_text}],
+            "tools": [{"name": tool["name"], "description": tool["description"], "input_schema": tool["parameters"], "strict": True}],
+            "tool_choice": {"type": "tool", "name": "submit_research_result", "disable_parallel_tool_use": True},
+        }
+        if reasoning_effort and reasoning_effort != "none":
+            body["thinking"] = {"type": "adaptive"}
+            body["output_config"] = {"effort": reasoning_effort}
+    else:
+        if not endpoint.endswith("/responses"):
+            endpoint += "/responses"
+        tools: list[dict[str, Any]] = [_agent_tool()]
+        if web_search:
+            tools.insert(0, {"type": "web_search"})
+        body = {"model": model, "instructions": instructions, "input": input_text, "tools": tools, "store": False}
+        if reasoning_effort:
+            body["reasoning"] = {"effort": reasoning_effort}
+        if provider == "openai":
+            body["tool_choice"] = {"type": "function", "name": "submit_research_result"}
+        elif provider == "qwen":
+            body["tool_choice"] = "required"
+        elif provider == "deepseek" and reasoning_effort == "none":
+            body["tool_choice"] = {"type": "function", "name": "submit_research_result"}
+        elif provider == "local":
+            body["tool_choice"] = "auto"
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(endpoint, headers=headers, json=body)
+    except httpx.RequestError as error:
+        raise HTTPException(502, f"Could not reach {provider_label}: {error}") from error
+    if response.status_code >= 400:
+        try:
+            error_body = response.json().get("error", {})
+            message = error_body.get("message", response.text) if isinstance(error_body, dict) else str(error_body)
+        except ValueError:
+            message = response.text
+        raise HTTPException(502, f"{provider_label} request failed: {message}")
+    result = response.json()
+    return _anthropic_result(result, provider_label) if config["api_style"] == "anthropic" else _response_result(result, provider_label)
+
+
 async def _provider_agent(payload: AgentRunRequest, context: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str, str]:
     config = _active_agent_config()
     if not config["configured"]:
         raise HTTPException(409, "No agent provider is configured. Connect one in Agent Workspace first.")
     provider = str(config["provider"])
     provider_label = str(config["label"])
-    api_key = str(config.get("api_key", "")).strip()
     model = payload.model.strip() or str(config["model"])
+    reasoning_effort = payload.reasoning_effort or str(config["reasoning_effort"])
     if payload.web_search and not config["web_search"]:
         raise HTTPException(400, f"{provider_label} is not configured for server-side web search")
     instructions = f"""You are IdeaMiner's research partner. {AGENT_MODES[payload.mode]}
@@ -320,51 +452,12 @@ Never expose a raw reference such as "Idea #4" in the answer. Refer to a supplie
 When referring to an explicitly supplied local file, use its stable token [[file:ID]] instead of a machine-specific path.
 When elaborating, make the answer a self-contained research note suitable for saving. Start it with one level-one Markdown heading containing a concise refined title.
 Always finish by calling submit_research_result. Write the answer in clear Markdown."""
-    tools: list[dict[str, Any]] = [_agent_tool()]
-    if payload.web_search:
-        tools.insert(0, {"type": "web_search"})
-    request_body = {
-        "model": model,
-        "instructions": instructions,
-        "input": f"User request:\n{payload.prompt}\n\nIdeaMiner context:\n{json.dumps(context, ensure_ascii=False)}",
-        "tools": tools,
-        "tool_choice": {"type": "function", "name": "submit_research_result"},
-        "store": False,
-    }
-    if provider == "deepseek":
-        # DeepSeek enables thinking by default, but named tool_choice is unavailable in that mode.
-        # IdeaMiner forces its result tool so proposals stay structured and reviewable.
-        request_body["reasoning"] = {"effort": "none"}
-    endpoint = str(config["base_url"]).rstrip("/")
-    if not endpoint.endswith("/responses"):
-        endpoint += "/responses"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        async with httpx.AsyncClient(timeout=90) as client:
-            response = await client.post(endpoint, headers=headers, json=request_body)
-    except httpx.RequestError as error:
-        raise HTTPException(502, f"Could not reach {provider_label}: {error}") from error
-    if response.status_code >= 400:
-        try:
-            message = response.json().get("error", {}).get("message", response.text)
-        except ValueError:
-            message = response.text
-        raise HTTPException(502, f"{provider_label} request failed: {message}")
-    result = response.json()
-    for item in result.get("output", []):
-        if item.get("type") == "function_call" and item.get("name") == "submit_research_result":
-            try:
-                structured = json.loads(item.get("arguments", "{}"))
-                answer = str(structured.get("answer", ""))
-                proposals = structured.get("proposals", [])
-                if not isinstance(proposals, list):
-                    proposals = []
-                return answer, proposals[:5], model, provider
-            except (TypeError, ValueError) as error:
-                raise HTTPException(502, f"{provider_label} returned an unreadable structured result") from error
-    raise HTTPException(502, f"{provider_label} did not return the expected research result")
+    answer, proposals = await _call_agent_provider(
+        config, model=model, reasoning_effort=reasoning_effort, instructions=instructions,
+        input_text=f"User request:\n{payload.prompt}\n\nIdeaMiner context:\n{json.dumps(context, ensure_ascii=False)}",
+        web_search=payload.web_search,
+    )
+    return answer, proposals, model, provider
 
 
 def _dream_context(connection: sqlite3.Connection, idea_ids: list[int]) -> dict[str, Any]:
@@ -391,45 +484,19 @@ async def _provider_dream(payload: DreamRunRequest, context: dict[str, Any], des
     config = _active_agent_config()
     if not config["configured"]:
         raise HTTPException(409, "No agent provider is configured. Connect one in Agent Workspace first.")
-    provider, provider_label = str(config["provider"]), str(config["label"])
-    model, api_key = payload.model.strip() or str(config["model"]), str(config.get("api_key", "")).strip()
+    provider = str(config["provider"])
+    model = payload.model.strip() or str(config["model"])
     instructions = f"""You are IdeaMiner's Dream partner. Combine the selected research ideas into surprising but rigorous, testable descendant directions.
 The selected ideas may come from different projects; treat their tensions and complementarities as useful material. Do not claim to have changed the database.
 Return two to five distinct create_idea proposals, each with a concise title, a self-contained Markdown note, status, and optional additional tags. The destination project is {destination_project['name']} (ID {destination_project['id']}). Do not make updates or relations yourself.
 Every proposed idea will be tagged DREAMS and linked to every selected source by IdeaMiner after the user reviews and applies it. Refer to sources only with stable tokens such as [[idea:12]], never plain "Idea #12".
 The user's optional dream guidance is: {payload.prompt or 'None — look for the most promising unexpected combinations.'}
 Always finish by calling submit_research_result. Write a brief Markdown synthesis in answer, followed by structured proposals."""
-    body: dict[str, Any] = {"model": model, "instructions": instructions,
-        "input": f"Dream source context:\n{json.dumps(context, ensure_ascii=False)}", "tools": [_agent_tool()],
-        "tool_choice": {"type": "function", "name": "submit_research_result"}, "store": False}
-    if provider == "deepseek":
-        body["reasoning"] = {"effort": "none"}
-    endpoint = str(config["base_url"]).rstrip("/")
-    if not endpoint.endswith("/responses"):
-        endpoint += "/responses"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        async with httpx.AsyncClient(timeout=90) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-    except httpx.RequestError as error:
-        raise HTTPException(502, f"Could not reach {provider_label}: {error}") from error
-    if response.status_code >= 400:
-        try:
-            message = response.json().get("error", {}).get("message", response.text)
-        except ValueError:
-            message = response.text
-        raise HTTPException(502, f"{provider_label} request failed: {message}")
-    for item in response.json().get("output", []):
-        if item.get("type") == "function_call" and item.get("name") == "submit_research_result":
-            try:
-                result = json.loads(item.get("arguments", "{}"))
-                proposals = result.get("proposals", [])
-                return str(result.get("answer", "")), proposals[:5] if isinstance(proposals, list) else [], model, provider
-            except (TypeError, ValueError) as error:
-                raise HTTPException(502, f"{provider_label} returned an unreadable Dream result") from error
-    raise HTTPException(502, f"{provider_label} did not return the expected Dream result")
+    answer, proposals = await _call_agent_provider(
+        config, model=model, reasoning_effort=str(config["reasoning_effort"]), instructions=instructions,
+        input_text=f"Dream source context:\n{json.dumps(context, ensure_ascii=False)}",
+    )
+    return answer, proposals, model, provider
 
 
 def _agent_document(response_text: str, fallback_title: str) -> tuple[str, str]:
@@ -599,6 +666,17 @@ def weekly_review(project_id: int | None = None, group_id: int | None = None) ->
 @app.get("/api/agent/status")
 def agent_status() -> dict[str, Any]:
     config = _active_agent_config()
+    profiles = []
+    for provider, definition in AGENT_PROVIDERS.items():
+        profile = _agent_config_for(provider)
+        profiles.append({
+            "id": provider, "label": definition["label"], "configured": profile["configured"],
+            "configuration_source": profile["source"], "credential_stored": profile["source"] == "secure_storage",
+            "model": profile["model"], "base_url": profile["base_url"], "reasoning_effort": profile["reasoning_effort"],
+            "models": definition["models"], "reasoning_efforts": definition["reasoning_efforts"],
+            "default_model": definition["model"], "default_base_url": definition["base_url"],
+            "api_key_required": definition["api_key_required"], "web_search_supported": definition["web_search"],
+        })
     return {
         "provider": config["provider"],
         "provider_label": config["label"],
@@ -606,35 +684,75 @@ def agent_status() -> dict[str, Any]:
         "configuration_source": config["source"],
         "default_model": config["model"],
         "base_url": config["base_url"],
+        "reasoning_effort": config["reasoning_effort"],
         "web_search_supported": config["web_search"],
-        "providers": [
-            {"id": provider, "label": definition["label"], "default_model": definition["model"], "default_base_url": definition["base_url"], "web_search_supported": definition["web_search"]}
-            for provider, definition in AGENT_PROVIDERS.items()
-        ],
+        "providers": profiles,
+        "credential_store_available": credential_store_available(),
         "capabilities": ["idea-context", "structured-proposals"] + (["web-search"] if config["web_search"] else []),
-        "privacy": "Only the context shown in Agent Workspace is sent. Original raw captures are excluded; local files require explicit selection.",
+        "privacy": "Only the context shown in Agent Workspace is sent. Original raw captures are excluded; local files require explicit selection. Remembered API keys stay in the operating system credential vault.",
     }
 
 
 @app.post("/api/agent/config")
 def configure_agent(payload: AgentConnectionCreate) -> dict[str, Any]:
-    api_key = payload.api_key.get_secret_value().strip()
-    definition = AGENT_PROVIDERS[payload.provider]
+    provider = "local" if payload.provider == "custom" else payload.provider
+    definition = AGENT_PROVIDERS[provider]
+    existing = _agent_config_for(provider)
+    api_key = payload.api_key.get_secret_value().strip() or str(existing.get("api_key", "")).strip()
     model = payload.model or str(definition["model"])
     base_url = payload.base_url or str(definition["base_url"])
-    if payload.provider != "custom" and len(api_key) < 8:
+    reasoning_effort = payload.reasoning_effort or str(definition["default_effort"])
+    if definition["api_key_required"] and len(api_key) < 8:
         raise HTTPException(400, f"Enter a valid {definition['label']} API key")
     if not model:
         raise HTTPException(400, "Enter a model name")
     if not _valid_base_url(base_url):
         raise HTTPException(400, "Enter a valid HTTP or HTTPS base URL without embedded credentials")
-    app.state.agent_config = {"provider": payload.provider, "api_key": api_key, "model": model, "base_url": base_url}
+    if reasoning_effort not in definition["reasoning_efforts"]:
+        raise HTTPException(400, f"Choose a reasoning effort supported by {definition['label']}")
+    if payload.remember_api_key and api_key:
+        try:
+            save_api_key(provider, api_key)
+        except CredentialStoreError as error:
+            raise HTTPException(503, str(error)) from error
+    configs = getattr(app.state, "agent_configs", {})
+    configs[provider] = {
+        "provider": provider, "api_key": "" if payload.remember_api_key else api_key,
+        "model": model, "base_url": base_url, "reasoning_effort": reasoning_effort,
+    }
+    app.state.agent_configs = configs
+    app.state.active_agent_provider = provider
+    save_profile(provider, {"model": model, "base_url": base_url, "reasoning_effort": reasoning_effort})
+    return agent_status()
+
+
+@app.post("/api/agent/activate/{provider}")
+def activate_agent_provider(provider: str) -> dict[str, Any]:
+    if provider not in AGENT_PROVIDERS:
+        raise HTTPException(404, "Unknown agent provider")
+    app.state.active_agent_provider = provider
+    set_active_provider(provider)
     return agent_status()
 
 
 @app.delete("/api/agent/config")
 def clear_agent_config() -> dict[str, Any]:
-    app.state.agent_config = {}
+    provider = str(_active_agent_config()["provider"])
+    configs = getattr(app.state, "agent_configs", {})
+    configs.pop(provider, None)
+    app.state.agent_configs = configs
+    return agent_status()
+
+
+@app.delete("/api/agent/config/{provider}")
+def forget_agent_profile(provider: str) -> dict[str, Any]:
+    if provider not in AGENT_PROVIDERS:
+        raise HTTPException(404, "Unknown agent provider")
+    configs = getattr(app.state, "agent_configs", {})
+    configs.pop(provider, None)
+    app.state.agent_configs = configs
+    delete_api_key(provider)
+    reset_profile(provider)
     return agent_status()
 
 
