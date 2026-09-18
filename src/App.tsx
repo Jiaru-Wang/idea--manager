@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ClipboardCheck, CloudMoon, Copy, Download, Folder, FolderInput, FolderPlus, GitFork, Layers3, LayoutGrid, Lightbulb, Link2, ListFilter, Maximize2, Minimize2, Paperclip, Plus, Power, RefreshCw, Route, Search, Settings2, Sparkles, Sprout, Trash2, Upload, X } from 'lucide-react'
+import { ClipboardCheck, CloudMoon, Copy, Download, Folder, FolderInput, FolderPlus, GitFork, Layers3, LayoutGrid, Lightbulb, Link2, List, ListFilter, Maximize2, Minimize2, Paperclip, Plus, Power, RefreshCw, Route, Search, Settings2, Sparkles, Sprout, Trash2, Upload, X } from 'lucide-react'
 import { api, type ImportPreview, type ImportResult } from './api'
 import { AgentWorkspace } from './components/AgentWorkspace'
 import { AttachmentPanel } from './components/AttachmentPanel'
@@ -16,7 +16,8 @@ import { TagManager } from './components/TagManager'
 import { tagGroupStyle, tagStyle } from './tagColors'
 import type { Idea, Project, ProjectGroup, Relation, Status, Suggestion, TagInfo } from './types'
 
-type View = 'cards' | 'graph' | 'lineage'
+type View = 'focus' | 'cards' | 'graph' | 'lineage'
+type FocusDensity = 'comfortable' | 'compact'
 type Scope = { type: 'all' } | { type: 'project'; id: number } | { type: 'group'; id: number }
 const statusLabels: Record<Status, string> = { seed: 'Seed', exploring: 'Exploring', promising: 'Promising', parked: 'Parked' }
 
@@ -45,7 +46,8 @@ export default function App() {
   const [activeTags, setActiveTags] = useState<string[]>([])
   const [status, setStatus] = useState('')
   const [relationFilter, setRelationFilter] = useState('')
-  const [view, setView] = useState<View>('cards')
+  const [view, setView] = useState<View>('focus')
+  const [focusDensity, setFocusDensity] = useState<FocusDensity>(() => window.localStorage.getItem('ideaminer-focus-density') === 'compact' ? 'compact' : 'comfortable')
   const [editor, setEditor] = useState<'new' | Idea | null>(null)
   const [selected, setSelected] = useState<(Idea & { relations?: Relation[] }) | null>(null)
   const [detailFullscreen, setDetailFullscreen] = useState(false)
@@ -63,6 +65,7 @@ export default function App() {
   const [dreamIdeaIds, setDreamIdeaIds] = useState<number[]>([])
   const [managingTags, setManagingTags] = useState(false)
   const importInput = useRef<HTMLInputElement>(null)
+  const searchInput = useRef<HTMLInputElement>(null)
   const libraryRevision = useRef<number | null>(null)
   const selectedIdeaId = useRef<number | null>(null)
   const initialDeepLinkOpened = useRef(false)
@@ -105,16 +108,50 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       if (detailFullscreen) setDetailFullscreen(false)
-      else setSelected(null)
+      else if (view !== 'focus') setSelected(null)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [selected, detailFullscreen])
+  }, [selected, detailFullscreen, view])
 
   const openIdea = useCallback(async (id: number) => {
     const [detail, suggested] = await Promise.all([api.idea(id), api.suggestions(id)])
     setSelected(detail); setSuggestions(suggested)
   }, [])
+
+  useEffect(() => {
+    if (loading || view !== 'focus' || !ideas.length) return
+    if (!selected || !ideas.some(idea => idea.id === selected.id)) {
+      void openIdea(ideas[0].id).catch(() => setError(`Idea #${ideas[0].id} was not found`))
+    }
+  }, [ideas, loading, openIdea, selected, view])
+
+  useEffect(() => {
+    if (view !== 'focus' || !ideas.length) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const typing = target?.matches('input, textarea, select, [contenteditable="true"]')
+      if (event.key === '/' && !typing) {
+        event.preventDefault()
+        searchInput.current?.focus()
+        return
+      }
+      if (typing || (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Enter')) return
+      if (event.key === 'Enter' && selected) {
+        event.preventDefault()
+        setDetailFullscreen(true)
+        return
+      }
+      const currentIndex = selected ? ideas.findIndex(idea => idea.id === selected.id) : -1
+      const nextIndex = event.key === 'ArrowDown'
+        ? Math.min(ideas.length - 1, currentIndex + 1)
+        : Math.max(0, currentIndex < 0 ? 0 : currentIndex - 1)
+      event.preventDefault()
+      void openIdea(ideas[nextIndex].id)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [ideas, openIdea, selected, view])
 
   useEffect(() => {
     if (loading || initialDeepLinkOpened.current) return
@@ -225,6 +262,17 @@ export default function App() {
     setDreamIdeaIds(current => current.includes(id) || current.length >= 8 ? current : [...current, id])
   }
 
+  function changeFocusDensity(next: FocusDensity) {
+    setFocusDensity(next)
+    window.localStorage.setItem('ideaminer-focus-density', next)
+  }
+
+  function switchView(next: View) {
+    setDetailFullscreen(false)
+    if (next !== 'focus') setSelected(null)
+    setView(next)
+  }
+
   const clearFilters = () => { setQuery(''); setActiveTags([]); setStatus(''); setRelationFilter('') }
   const filtered = Boolean(query || activeTags.length || status || relationFilter)
   const currentProject = scope.type === 'project' ? projects.find(project => project.id === scope.id) : undefined
@@ -275,7 +323,7 @@ export default function App() {
           {projects.filter(project => project.system_key === 'recycle').map(project => <button className={`recycle-link ${scope.type === 'project' && scope.id === project.id ? 'active' : ''}`} onClick={() => setScope({ type: 'project', id: project.id })} key={project.id}><Trash2 size={14}/><span>Recycle</span><small>{project.idea_count}</small></button>)}
         </nav>
         <div className="sidebar-label filter-label"><ListFilter size={14}/> FILTERS</div>
-        <label className="search"><Search size={17}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search every thought…"/>{query && <button onClick={() => setQuery('')}><X size={14}/></button>}</label>
+        <label className="search"><Search size={17}/><input ref={searchInput} value={query} onChange={e => setQuery(e.target.value)} placeholder="Search every thought…"/>{query && <button onClick={() => setQuery('')}><X size={14}/></button>}</label>
         <section><h3>Stage</h3>{(['seed', 'exploring', 'promising', 'parked'] as Status[]).map(item => <button key={item} onClick={() => setStatus(status === item ? '' : item)} className={`filter-row ${status === item ? 'active' : ''}`}><span className={`status-dot ${item}`}/>{statusLabels[item]}<span>{allIdeas.filter(i => i.status === item).length}</span></button>)}</section>
         <section><h3 className="tag-panel-title"><span>Tags</span><span><button title="Refresh tags" aria-label="Refresh tags" onClick={() => void refresh()}><RefreshCw size={13}/></button><button title="Manage tags and open tag map" aria-label="Manage tags and open tag map" onClick={() => setManagingTags(true)}><Settings2 size={13}/></button></span></h3><label className="tag-search"><Search size={13}/><input value={tagSearch} onChange={event => setTagSearch(event.target.value)} placeholder="Filter tags"/>{tagSearch && <button onClick={() => setTagSearch('')}><X size={12}/></button>}</label><div className="tag-filters">{Object.entries(tagsByGroup).map(([group, grouped]) => <div className="tag-filter-group" key={group}><small><i style={tagGroupStyle(group)}/>{group}</small><div>{grouped.map(tag => <button key={tag.name} style={tagStyle(tag.name, tag.group_name)} className={activeTags.includes(tag.name) ? 'active' : ''} onClick={() => setActiveTags(activeTags.includes(tag.name) ? activeTags.filter(t => t !== tag.name) : [...activeTags, tag.name])}>#{tag.name}<span>{tag.count}</span></button>)}</div></div>)}</div>{!tags.length ? <p className="empty-small">No tags yet.</p> : !tagSearch && tags.length > 16 ? <button className="more-tags" onClick={() => setManagingTags(true)}>Showing the 16 most-used tags · Manage all {tags.length}</button> : null}</section>
         <section><h3>Connection</h3><select className="sidebar-select" value={relationFilter} onChange={e => setRelationFilter(e.target.value)}><option value="">Any relation type</option>{relationTypes.map(type => <option key={type}>{type}</option>)}</select></section>
@@ -285,9 +333,29 @@ export default function App() {
 
       <section className="workspace">
         <select className="mobile-project-select" value={scope.type === 'all' ? 'all' : `${scope.type}:${scope.id}`} onChange={event => { const [type, id] = event.target.value.split(':'); setScope(type === 'all' ? { type: 'all' } : { type: type as 'project' | 'group', id: Number(id) }) }}><option value="all">All active ideas</option>{projectGroups.map(group => <option value={`group:${group.id}`} key={`g${group.id}`}>Group: {group.name}</option>)}{projects.map(project => <option value={`project:${project.id}`} key={`p${project.id}`}>{project.system_key === 'recycle' ? 'Recycle' : project.name}</option>)}</select>
-        <div className="workspace-head"><div><p className="eyebrow">{scope.type === 'group' ? 'PROJECT GROUP' : currentProject?.system_key === 'recycle' ? 'RECYCLE BIN' : scope.type === 'project' ? 'PROJECT' : 'YOUR KNOWLEDGE GARDEN'}</p><h1>{query ? `Results in ${scopeTitle}` : activeTags.length ? `${scopeTitle} · #${activeTags[0]}` : scopeTitle}</h1><p>{ideas.length} {ideas.length === 1 ? 'thought' : 'thoughts'} · {relations.filter(r => ideas.some(i => i.id === r.source_id) && ideas.some(i => i.id === r.target_id)).length} visible connections</p></div><div className="workspace-actions">{currentProject && ideas.length > 0 && <button className="button bulk-delete" onClick={clearCurrentProject}><Trash2 size={15}/>{currentProject.system_key === 'recycle' ? 'Empty recycle' : 'Recycle all'}</button>}<div className="view-toggle"><button className={view === 'cards' ? 'active' : ''} onClick={() => setView('cards')}><LayoutGrid size={16}/> Cards</button><button className={view === 'graph' ? 'active' : ''} onClick={() => setView('graph')}><GitFork size={16}/> Graph</button><button className={view === 'lineage' ? 'active' : ''} onClick={() => setView('lineage')}><Route size={16}/> Lineage</button></div></div></div>
+        <div className="workspace-head"><div><p className="eyebrow">{scope.type === 'group' ? 'PROJECT GROUP' : currentProject?.system_key === 'recycle' ? 'RECYCLE BIN' : scope.type === 'project' ? 'PROJECT' : 'YOUR KNOWLEDGE GARDEN'}</p><h1>{query ? `Results in ${scopeTitle}` : activeTags.length ? `${scopeTitle} · #${activeTags[0]}` : scopeTitle}</h1><p>{ideas.length} {ideas.length === 1 ? 'thought' : 'thoughts'} · {relations.filter(r => ideas.some(i => i.id === r.source_id) && ideas.some(i => i.id === r.target_id)).length} visible connections</p></div><div className="workspace-actions">{currentProject && ideas.length > 0 && <button className="button bulk-delete" onClick={clearCurrentProject}><Trash2 size={15}/>{currentProject.system_key === 'recycle' ? 'Empty recycle' : 'Recycle all'}</button>}<div className="view-toggle"><button className={view === 'focus' ? 'active' : ''} onClick={() => switchView('focus')}><List size={16}/> Focus</button><button className={view === 'cards' ? 'active' : ''} onClick={() => switchView('cards')}><LayoutGrid size={16}/> Cards</button><button className={view === 'graph' ? 'active' : ''} onClick={() => switchView('graph')}><GitFork size={16}/> Graph</button><button className={view === 'lineage' ? 'active' : ''} onClick={() => switchView('lineage')}><Route size={16}/> Lineage</button></div></div></div>
         {error && <div className="error-banner">{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
-        {loading ? <div className="loading"><Sprout/> Growing your garden…</div> : ideas.length === 0 ? <div className="empty-state"><div>{currentProject?.system_key === 'recycle' ? <Trash2 size={30}/> : <Lightbulb size={30}/>}</div><h2>{filtered ? 'No ideas match' : currentProject?.system_key === 'recycle' ? 'Recycle is empty' : 'Plant your first idea'}</h2><p>{filtered ? 'Try widening your filters or searching another phrase.' : currentProject?.system_key === 'recycle' ? 'Deleted topics will wait here until you restore or permanently remove them.' : 'Capture a research question, a surprising connection, or a half-formed hunch.'}</p>{currentProject?.system_key !== 'recycle' && <button className="button primary" onClick={filtered ? clearFilters : () => setEditor('new')}>{filtered ? 'Clear filters' : <><Plus size={17}/> Capture an idea</>}</button>}</div> : view === 'graph' ? <GraphView ideas={ideas} relations={relations} onSelect={openIdea}/> : view === 'lineage' ? <LineageView ideas={ideas} relations={relations} onSelect={openIdea}/> : <div className="idea-grid">{ideas.map(idea => <article draggable className={`idea-card ${dreamIdeaIds.includes(idea.id) ? 'dream-selected' : ''}`} key={idea.id} onDragStart={event => { event.dataTransfer.effectAllowed = 'copy'; event.dataTransfer.setData('application/x-ideaminer-idea', String(idea.id)) }} onClick={() => openIdea(idea.id)}>
+        {loading ? <div className="loading"><Sprout/> Growing your garden…</div> : ideas.length === 0 ? <div className="empty-state"><div>{currentProject?.system_key === 'recycle' ? <Trash2 size={30}/> : <Lightbulb size={30}/>}</div><h2>{filtered ? 'No ideas match' : currentProject?.system_key === 'recycle' ? 'Recycle is empty' : 'Plant your first idea'}</h2><p>{filtered ? 'Try widening your filters or searching another phrase.' : currentProject?.system_key === 'recycle' ? 'Deleted topics will wait here until you restore or permanently remove them.' : 'Capture a research question, a surprising connection, or a half-formed hunch.'}</p>{currentProject?.system_key !== 'recycle' && <button className="button primary" onClick={filtered ? clearFilters : () => setEditor('new')}>{filtered ? 'Clear filters' : <><Plus size={17}/> Capture an idea</>}</button>}</div> : view === 'graph' ? <GraphView ideas={ideas} relations={relations} onSelect={openIdea}/> : view === 'lineage' ? <LineageView ideas={ideas} relations={relations} onSelect={openIdea}/> : view === 'focus' ? <div className={`focus-browser ${focusDensity}`}>
+          <section className="focus-list-pane">
+            <header><div><strong>Idea navigator</strong><span>{ideas.length} visible · ↑↓ to move · Enter to expand</span></div><div className="density-toggle" aria-label="List density"><button className={focusDensity === 'comfortable' ? 'active' : ''} onClick={() => changeFocusDensity('comfortable')}>Roomy</button><button className={focusDensity === 'compact' ? 'active' : ''} onClick={() => changeFocusDensity('compact')}>Compact</button></div></header>
+            <div className="focus-list" role="list">{ideas.map(idea => {
+              const project = projects.find(item => item.id === idea.project_id)
+              const connectionCount = relations.filter(relation => relation.source_id === idea.id || relation.target_id === idea.id).length
+              return <article role="listitem" tabIndex={0} draggable className={`focus-row ${selected?.id === idea.id ? 'selected' : ''} ${dreamIdeaIds.includes(idea.id) ? 'dream-selected' : ''}`} key={idea.id} onDragStart={event => { event.dataTransfer.effectAllowed = 'copy'; event.dataTransfer.setData('application/x-ideaminer-idea', String(idea.id)) }} onClick={() => void openIdea(idea.id)}>
+                <span className={`status-dot ${idea.status}`}/><div className="focus-row-main"><div><strong>{idea.title}</strong><time>{formatDate(idea.updated_at)}</time></div><p>{resolveIdeaReferencePlainText(idea.content || 'No notes yet.', allIdeas)}</p><footer><span>{project?.name ?? 'Unknown project'}</span><div>{idea.tags.slice(0, 2).map(tag => <span className="tag" style={styleForTag(tag)} key={tag}>#{tag}</span>)}{idea.tags.length > 2 && <small>+{idea.tags.length - 2}</small>}</div><span><Link2 size={11}/>{connectionCount}</span></footer></div>
+              </article>
+            })}</div>
+          </section>
+          <aside className="focus-preview">{selected ? <>
+            <header><label className={`status-pill status-picker ${selected.status}`}><span/><select value={selected.status} onChange={event => void changeIdeaStatus(event.target.value as Status)} aria-label="Change idea status">{(Object.keys(statusLabels) as Status[]).map(value => <option value={value} key={value}>{statusLabels[value]}</option>)}</select></label><button className="icon-button" title="Open full screen" aria-label="Open idea full screen" onClick={() => setDetailFullscreen(true)}><Maximize2 size={16}/></button></header>
+            <p className="focus-context"><Folder size={13}/>{projects.find(project => project.id === selected.project_id)?.name ?? 'Unknown project'}<span>Updated {formatDate(selected.updated_at)}</span></p>
+            <h2>{selected.title}</h2><div className="detail-tags">{selected.tags.map(tag => <span className="tag" style={styleForTag(tag)} key={tag}>#{tag}</span>)}</div>
+            <div className="markdown focus-markdown"><IdeaMarkdown content={selected.content || '_No notes yet._'} ideas={allIdeas} attachments={selected.attachments} onIdeaSelect={openIdea} onFileOpen={id => void api.openAttachment(id)}/></div>
+            {projects.find(project => project.id === selected.project_id)?.system_key !== 'recycle' && <div className="focus-actions"><button className="button agent-launch" onClick={() => setAgentContext(selected)}><Sparkles size={15}/> Agent</button><button className="button secondary" onClick={() => setEditor(selected)}>Edit</button><button className="button secondary" onClick={() => setDetailFullscreen(true)}><Maximize2 size={15}/> Full detail</button></div>}
+            <section className="focus-connections"><h3><Link2 size={14}/> Connections</h3>{selected.relations?.length ? selected.relations.slice(0, 5).map(relation => { const otherId = relation.source_id === selected.id ? relation.target_id : relation.source_id; const otherTitle = relation.source_id === selected.id ? relation.target_title : relation.source_title; return <button key={relation.id} onClick={() => void openIdea(otherId)}><span>{relation.relation_type}</span><strong>{otherTitle}</strong></button> }) : <p className="empty-small">No recorded connections yet.</p>}</section>
+            <section className="focus-connections"><h3><Sprout size={14}/> Related ideas</h3>{suggestions.length ? suggestions.slice(0, 4).map(item => <button key={item.id} onClick={() => void openIdea(item.id)}><strong>{item.title}</strong><span>{item.reason}</span></button>) : <p className="empty-small">Add tags or richer notes to surface connections.</p>}</section>
+          </> : <div className="focus-placeholder"><Sprout size={26}/><strong>Select an idea</strong><span>Its notes and connections will stay here while you browse.</span></div>}</aside>
+        </div> : <div className="idea-grid">{ideas.map(idea => <article draggable className={`idea-card ${dreamIdeaIds.includes(idea.id) ? 'dream-selected' : ''}`} key={idea.id} onDragStart={event => { event.dataTransfer.effectAllowed = 'copy'; event.dataTransfer.setData('application/x-ideaminer-idea', String(idea.id)) }} onClick={() => openIdea(idea.id)}>
           <div className="card-top"><span className={`status-pill ${idea.status}`}><span/>{statusLabels[idea.status]}</span><time>{formatDate(idea.updated_at)}</time></div>
           <h2>{idea.title}</h2><p>{resolveIdeaReferencePlainText(idea.content || 'No notes yet.', allIdeas)}</p>
           <footer><div>{idea.tags.slice(0, 3).map(tag => <span className="tag" style={styleForTag(tag)} key={tag}>#{tag}</span>)}</div><span className="connection-count"><Link2 size={14}/>{relations.filter(r => r.source_id === idea.id || r.target_id === idea.id).length}</span></footer>
@@ -299,12 +367,12 @@ export default function App() {
     {managingProjects && <ProjectManager groups={projectGroups} onClose={() => setManagingProjects(false)} onCreateProject={createProject} onCreateGroup={createProjectGroup}/>} 
     {importState && <ImportDialog filename={importState.filename} preview={importState.preview} onClose={() => setImportState(null)} onImport={runImport}/>} 
     {managingTags && <TagManager visibleIdeaIds={ideas.map(idea => idea.id)} scope={scope} onClose={() => setManagingTags(false)} onChanged={refresh} onFilterTag={name => { setActiveTags([name]); setManagingTags(false) }}/>} 
-    {selected && <div className={`drawer-backdrop ${detailFullscreen ? 'detail-fullscreen-backdrop' : ''}`} onMouseDown={e => e.target === e.currentTarget && setSelected(null)}><aside className={`detail-drawer ${detailFullscreen ? 'fullscreen' : ''}`}>
-      <header><label className={`status-pill status-picker ${selected.status}`}><span/><select value={selected.status} onChange={event => void changeIdeaStatus(event.target.value as Status)} aria-label="Change idea status">{(Object.keys(statusLabels) as Status[]).map(value => <option value={value} key={value}>{statusLabels[value]}</option>)}</select></label><div><button className="icon-button" aria-label={detailFullscreen ? 'Restore idea drawer' : 'View idea full screen'} title={detailFullscreen ? 'Restore drawer' : 'View full screen'} onClick={() => setDetailFullscreen(value => !value)}>{detailFullscreen ? <Minimize2 size={17}/> : <Maximize2 size={17}/>}</button><button className="icon-button danger" title={projects.find(project => project.id === selected.project_id)?.system_key === 'recycle' ? 'Delete permanently' : 'Move to recycle'} onClick={() => removeIdea(selected.id)}><Trash2 size={17}/></button><button className="icon-button" aria-label="Close idea" onClick={() => setSelected(null)}><X size={20}/></button></div></header>
+    {selected && (view !== 'focus' || detailFullscreen) && <div className={`drawer-backdrop ${detailFullscreen ? 'detail-fullscreen-backdrop' : ''}`} onMouseDown={e => e.target === e.currentTarget && (detailFullscreen ? setDetailFullscreen(false) : setSelected(null))}><aside className={`detail-drawer ${detailFullscreen ? 'fullscreen' : ''}`}>
+      <header><label className={`status-pill status-picker ${selected.status}`}><span/><select value={selected.status} onChange={event => void changeIdeaStatus(event.target.value as Status)} aria-label="Change idea status">{(Object.keys(statusLabels) as Status[]).map(value => <option value={value} key={value}>{statusLabels[value]}</option>)}</select></label><div><button className="icon-button" aria-label={detailFullscreen ? 'Restore idea drawer' : 'View idea full screen'} title={detailFullscreen ? 'Restore drawer' : 'View full screen'} onClick={() => setDetailFullscreen(value => !value)}>{detailFullscreen ? <Minimize2 size={17}/> : <Maximize2 size={17}/>}</button><button className="icon-button danger" title={projects.find(project => project.id === selected.project_id)?.system_key === 'recycle' ? 'Delete permanently' : 'Move to recycle'} onClick={() => removeIdea(selected.id)}><Trash2 size={17}/></button><button className="icon-button" aria-label="Close idea" onClick={() => detailFullscreen && view === 'focus' ? setDetailFullscreen(false) : setSelected(null)}><X size={20}/></button></div></header>
       <h1>{selected.title}</h1><div className="detail-tags">{selected.tags.map(t => <span className="tag" style={styleForTag(t)} key={t}>#{t}</span>)}</div>
       <div className="topic-location"><Folder size={14}/>{projects.find(project => project.id === selected.project_id)?.name ?? 'Unknown project'}</div>
       <div className="markdown"><IdeaMarkdown content={selected.content || '_No notes yet._'} ideas={allIdeas} attachments={selected.attachments} onIdeaSelect={openIdea} onFileOpen={id => void api.openAttachment(id)}/></div>
-      {projects.find(project => project.id === selected.project_id)?.system_key !== 'recycle' && <><button className="button agent-launch wide" onClick={() => { setAgentContext(selected); setSelected(null) }}><Sparkles size={16}/> Explore with Agent</button><button className="button secondary wide" onClick={() => { setEditor(selected); setSelected(null) }}>Edit idea</button></>}
+      {projects.find(project => project.id === selected.project_id)?.system_key !== 'recycle' && <><button className="button agent-launch wide" onClick={() => { setAgentContext(selected); if (view === 'focus') setDetailFullscreen(false); else setSelected(null) }}><Sparkles size={16}/> Explore with Agent</button><button className="button secondary wide" onClick={() => { setEditor(selected); if (view === 'focus') setDetailFullscreen(false); else setSelected(null) }}>Edit idea</button></>}
       <section className="detail-section"><h3><FolderInput size={16}/> Project actions</h3><TopicProjectActions idea={selected} projects={projects} onMove={moveIdea} onCopy={copyIdea}/></section>
       <section className="detail-section"><h3><Paperclip size={16}/> Local files</h3><AttachmentPanel idea={selected} project={projects.find(project => project.id === selected.project_id)} onChanged={async () => { await refresh(); await openIdea(selected.id) }}/></section>
       <section className="detail-section"><h3><Link2 size={16}/> Connections</h3><RelationForm idea={selected} ideas={allIdeas} types={relationTypes} onCreate={createRelation}/>{selected.relations?.map(relation => { const other = relation.source_id === selected.id ? relation.target_title : relation.source_title; return <div className="relation-item" key={relation.id}><div><span>{relation.relation_type}</span><strong>{other}</strong>{relation.note && <small>{relation.note}</small>}</div><button onClick={async () => { await api.deleteRelation(relation.id); await refresh(); await openIdea(selected.id) }}><X size={14}/></button></div> })}</section>
@@ -314,7 +382,7 @@ export default function App() {
     {agentContext !== undefined && <AgentWorkspace scope={scope} contextIdea={agentContext} ideas={allIdeas} projects={projects} groups={projectGroups} onClose={() => setAgentContext(undefined)} onChanged={refresh} onIdeaSelect={id => { setAgentContext(undefined); void openIdea(id) }}/>} 
     {reviewOpen && <ReviewDashboard scope={scope} scopeTitle={scopeTitle} onClose={() => setReviewOpen(false)} onChanged={refresh} onIdeaSelect={id => { setReviewOpen(false); void openIdea(id) }}/>} 
     {dreamOpen && <DreamWorkspace ideaIds={dreamIdeaIds} ideas={allIdeas} projects={projects} onClose={() => setDreamOpen(false)} onRemove={id => setDreamIdeaIds(current => current.filter(item => item !== id))} onChanged={refresh} onIdeaSelect={id => { setDreamOpen(false); void openIdea(id) }} onOpenAgent={() => { setDreamOpen(false); setAgentContext(null) }}/>} 
-    <button className={`dream-dock ${dreamIdeaIds.length ? 'ready' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addDreamIdea(Number(event.dataTransfer.getData('application/x-ideaminer-idea'))) }} onClick={() => setDreamOpen(true)}><CloudMoon size={18}/><span>{dreamIdeaIds.length ? `${dreamIdeaIds.length} idea${dreamIdeaIds.length === 1 ? '' : 's'} ready to Dream` : 'Drag idea cards here to Dream'}</span></button>
+    <button className={`dream-dock ${dreamIdeaIds.length ? 'ready' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addDreamIdea(Number(event.dataTransfer.getData('application/x-ideaminer-idea'))) }} onClick={() => setDreamOpen(true)}><CloudMoon size={18}/><span>{dreamIdeaIds.length ? `${dreamIdeaIds.length} idea${dreamIdeaIds.length === 1 ? '' : 's'} ready to Dream` : 'Drag ideas here to Dream'}</span></button>
     {stopped && <div className="shutdown-screen"><div className="shutdown-card"><div className="brand-mark"><Sprout size={25}/></div><p className="eyebrow">SHUTDOWN COMPLETE</p><h1>IdeaMiner has stopped.</h1><p>Your ideas are safely stored in SQLite. You can close this browser tab and double-click <code>start-ideaminer.bat</code> whenever you want to return.</p></div></div>}
   </div>
 }

@@ -24,6 +24,7 @@ For example: capture “Could prediction change with temporal scale?”, grow se
 - Projects, project groups, recycle bin, move/copy actions, and bulk cleanup
 - Tags, tag groups, deterministic group colors, co-occurrence Tag Map, and bulk tag management
 - FTS5 keyword search, filters, related-idea suggestions, graph view, and lineage tracking
+- Scalable Focus browser with a compact navigator, stable reading pane, density control, and keyboard navigation
 - Local-file references that store paths and metadata without embedding file contents
 - JSON import/export and Markdown export
 - Weekly review, local semantic discovery, and cross-project Dream synthesis
