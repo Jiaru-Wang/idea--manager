@@ -171,4 +171,17 @@ Useful local addresses:
 
 ## License
 
-Copyright 2026 Dongyang Kuang. Licensed under the [Apache License 2.0](LICENSE).
+This repository is a modified derivative of
+[IdeaMiner](https://github.com/dykuang/idea-manager), originally created by
+[Dongyang Kuang](https://github.com/dykuang).
+
+The original project and this derivative are distributed under the
+[Apache License 2.0](LICENSE).
+
+- Original work: Copyright 2026 Dongyang Kuang.
+- Modifications: Copyright 2026 JiaRu Wang.
+
+The modifications in this repository include MiniMax integration, Paper Lab,
+scholarly paper discovery, adaptive paper reasoning, reproduction planning,
+and cross-disciplinary research analysis. The upstream project's Git history
+and contributor attribution have been retained.
