@@ -221,6 +221,134 @@ def test_paper_discovery_merges_official_metadata_sources(monkeypatch):
         assert "目标期刊/会议匹配" in paper["match_reasons"]
 
 
+def test_paper_discovery_falls_back_when_venue_metadata_does_not_match(monkeypatch):
+    openalex = {
+        "results": [{
+            "id": "https://openalex.org/W2",
+            "title": "PATCHCODE: Discrete Latent Predictive Learning for EEG Foundation Model",
+            "abstract_inverted_index": {"EEG": [0], "foundation": [1], "model": [2]},
+            "publication_date": "2026-07-01",
+            "publication_year": 2026,
+            "primary_location": {"source": {"display_name": "PMLR"}},
+            "authorships": [{"author": {"display_name": "Kieren Yu"}}],
+            "doi": "",
+            "cited_by_count": 0,
+            "open_access": {"is_oa": True},
+        }]
+    }
+    crossref = {"message": {"items": []}}
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def get(self, url, params, headers):
+            return FakeResponse(openalex if "openalex" in url else crossref)
+
+    monkeypatch.setattr("backend.app.main.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        response = client.get("/api/papers/discover", params={
+            "q": "PATCHCODE EEG foundation model",
+            "venues": "Proceedings of Machine Learning Research",
+            "from_year": 2026,
+        })
+        assert response.status_code == 200
+        payload = response.json()
+        assert [paper["title"] for paper in payload["papers"]] == [openalex["results"][0]["title"]]
+        assert "目标期刊/会议精确筛选未命中" in payload["warnings"][0]
+        assert "目标期刊/会议匹配" not in payload["papers"][0]["match_reasons"]
+
+
+def test_paper_context_uses_explicit_corresponding_author_metadata(monkeypatch):
+    paper = {
+        "results": [{
+            "id": "https://openalex.org/W1",
+            "title": "A cross-disciplinary mechanism paper",
+            "corresponding_author_ids": ["https://openalex.org/A1"],
+            "authorships": [
+                {
+                    "is_corresponding": True,
+                    "author": {"id": "https://openalex.org/A1", "display_name": "Lead Corresponding", "orcid": "https://orcid.org/0000-0001"},
+                    "institutions": [{"display_name": "Example University"}],
+                },
+                {
+                    "is_corresponding": False,
+                    "author": {"id": "https://openalex.org/A2", "display_name": "Last Author"},
+                    "institutions": [],
+                },
+            ],
+        }]
+    }
+    recent = {
+        "results": [
+            paper["results"][0],
+            {
+                "id": "https://openalex.org/W2",
+                "title": "Earlier mechanism study",
+                "publication_year": 2025,
+                "primary_location": {"source": {"display_name": "Example Journal"}},
+                "doi": "https://doi.org/10.1000/earlier",
+                "cited_by_count": 12,
+            },
+        ]
+    }
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def get(self, _url, params, headers):
+            assert headers["User-Agent"].startswith("IdeaMiner/")
+            return FakeResponse(recent if "authorships.author.id" in params.get("filter", "") else paper)
+
+    monkeypatch.setattr("backend.app.main.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        response = client.get("/api/papers/context", params={
+            "title": "A cross-disciplinary mechanism paper",
+            "locator": "https://doi.org/10.1000/example",
+        })
+        assert response.status_code == 200
+        payload = response.json()
+        assert [author["name"] for author in payload["corresponding_authors"]] == ["Lead Corresponding"]
+        assert payload["corresponding_authors"][0]["institution"] == "Example University"
+        assert [work["title"] for work in payload["recent_works"]] == ["Earlier mechanism study"]
+        assert "is_corresponding" in payload["evidence_note"]
+
+
 def test_anthropic_messages_provider(monkeypatch):
     captured = {}
 

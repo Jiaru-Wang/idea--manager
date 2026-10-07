@@ -159,6 +159,15 @@ export interface PaperDiscoveryResult {
   sources: string[]
 }
 
+export interface PaperScholarlyContext {
+  paper_id: string
+  matched_title: string
+  corresponding_authors: { id: string; name: string; orcid: string; institution: string }[]
+  recent_works: { title: string; year: number; venue: string; doi: string; cited_by_count: number }[]
+  evidence_note: string
+  source: string
+}
+
 export interface SemanticStatus {
   ready: boolean
   model: string

@@ -78,7 +78,7 @@ class ImportRequest(ImportPreviewRequest):
 
 
 class AgentRunRequest(BaseModel):
-    prompt: str = Field(min_length=1, max_length=8000)
+    prompt: str = Field(min_length=1, max_length=24000)
     mode: Literal["explore", "elaborate", "critique", "connect", "synthesize"] = "explore"
     scope_type: Literal["all", "project", "group"] = "all"
     scope_id: int | None = None

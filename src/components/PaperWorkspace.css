@@ -35,5 +35,13 @@
 .paper-candidate footer{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:9px}
 .paper-candidate footer a{width:28px;height:28px;display:grid;place-items:center;border:1px solid #d3d8d2;border-radius:6px;color:#55726a;background:#fafaf6}
 .paper-candidate footer .button{min-height:28px}
+.paper-depth{border-top:1px solid #d8dcd5;padding-top:11px;margin-top:8px}
+.paper-depth>div:first-child{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;margin-bottom:7px}
+.paper-depth strong{font-size:10px;color:#52635b}
+.paper-depth span{font-size:8px;color:#8a938f;text-align:right}
+.paper-depth>div:last-child{display:grid;grid-template-columns:1fr 1fr;border:1px solid #cfd6d0;border-radius:7px;overflow:hidden;background:#faf9f5}
+.paper-depth button{border:0;border-right:1px solid #d8ddd7;background:transparent;color:#69766f;padding:8px 6px;font-size:9px}
+.paper-depth button:last-child{border-right:0}
+.paper-depth button.active{background:#dcecea;color:#2f6e70;font-weight:700}
 
 @media(max-width:620px){.paper-radar-controls{grid-template-columns:105px 1fr}.paper-candidate>strong{font-size:18px}}

@@ -761,8 +761,6 @@ async def discover_papers(
         for paper in papers:
             if paper["year"] and paper["year"] < from_year:
                 continue
-            if requested_venues and not _venue_matches(paper["venue"], requested_venues):
-                continue
             key = _paper_key(paper["doi"], paper["title"])
             existing = merged.get(key)
             if existing:
@@ -779,7 +777,16 @@ async def discover_papers(
                 merged[key] = paper
 
     query_tokens = {token for token in re.findall(r"[\w-]+", q.lower(), flags=re.UNICODE) if len(token) > 1}
-    papers = list(merged.values())
+    all_papers = list(merged.values())
+    papers = all_papers
+    if requested_venues:
+        venue_matches = [paper for paper in all_papers if _venue_matches(paper["venue"], requested_venues)]
+        if venue_matches:
+            papers = venue_matches
+        elif all_papers:
+            warnings.append(
+                "目标期刊/会议精确筛选未命中；已展示关键词相关候选，请到论文原文核对 venue。"
+            )
     for paper in papers:
         title_tokens = set(re.findall(r"[\w-]+", paper["title"].lower(), flags=re.UNICODE))
         overlap = len(query_tokens & title_tokens) / max(len(query_tokens), 1)
@@ -792,6 +799,89 @@ async def discover_papers(
         "query": q.strip(), "venues": requested_venues, "from_year": from_year,
         "papers": papers[:limit], "warnings": warnings,
         "sources": [name for response, (name, _) in zip(responses, parsers) if not isinstance(response, BaseException)],
+    }
+
+
+@app.get("/api/papers/context")
+async def paper_context(
+    title: str = Query(default="", max_length=500),
+    locator: str = Query(default="", max_length=1000),
+) -> dict[str, Any]:
+    if len(title.strip()) < 2 and len(locator.strip()) < 4:
+        raise HTTPException(422, "请提供论文标题或 DOI。")
+    doi_match = re.search(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", locator, flags=re.IGNORECASE)
+    lookup_params: dict[str, Any]
+    if doi_match:
+        lookup_params = {"filter": f"doi:https://doi.org/{doi_match.group(0)}", "per_page": 1}
+    else:
+        lookup_params = {"search": title.strip(), "sort": "relevance_score:desc", "per_page": 1}
+    api_key = os.environ.get("OPENALEX_API_KEY", "").strip()
+    if api_key:
+        lookup_params["api_key"] = api_key
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0), follow_redirects=True) as client:
+            lookup = await _academic_json(client, "https://api.openalex.org/works", lookup_params)
+            results = lookup.get("results", [])
+            if not results:
+                raise HTTPException(404, "OpenAlex 中没有找到这篇论文，请检查标题或 DOI。")
+            work = results[0]
+            work_id = str(work.get("id") or "")
+            corresponding_ids = {str(item) for item in work.get("corresponding_author_ids", [])}
+            authors: list[dict[str, str]] = []
+            for authorship in work.get("authorships", []):
+                if not isinstance(authorship, dict):
+                    continue
+                author = authorship.get("author") or {}
+                author_id = str(author.get("id") or "")
+                if authorship.get("is_corresponding") or author_id in corresponding_ids:
+                    institutions = authorship.get("institutions") or []
+                    authors.append({
+                        "id": author_id,
+                        "name": str(author.get("display_name") or authorship.get("raw_author_name") or "").strip(),
+                        "orcid": str(author.get("orcid") or ""),
+                        "institution": str((institutions[0] if institutions else {}).get("display_name") or ""),
+                    })
+
+            recent_works: list[dict[str, Any]] = []
+            author_ids = [author["id"].rsplit("/", 1)[-1] for author in authors if author["id"]][:3]
+            if author_ids:
+                recent_params: dict[str, Any] = {
+                    "filter": f"authorships.author.id:{'|'.join(author_ids)},from_publication_date:{max(1900, date.today().year - 5)}-01-01",
+                    "sort": "publication_date:desc", "per_page": 20,
+                }
+                if api_key:
+                    recent_params["api_key"] = api_key
+                recent_payload = await _academic_json(client, "https://api.openalex.org/works", recent_params)
+                for item in recent_payload.get("results", []):
+                    if not isinstance(item, dict) or str(item.get("id") or "") == work_id:
+                        continue
+                    source = ((item.get("primary_location") or {}).get("source") or {})
+                    recent_works.append({
+                        "title": str(item.get("title") or "").strip(),
+                        "year": int(item.get("publication_year") or 0),
+                        "venue": str(source.get("display_name") or "").strip(),
+                        "doi": str(item.get("doi") or "").replace("https://doi.org/", ""),
+                        "cited_by_count": int(item.get("cited_by_count") or 0),
+                    })
+                    if len(recent_works) >= 12:
+                        break
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as error:
+        raise HTTPException(502, "通讯作者学术轨迹暂时无法获取，请稍后重试。") from error
+
+    return {
+        "paper_id": work_id,
+        "matched_title": str(work.get("title") or "").strip(),
+        "corresponding_authors": authors,
+        "recent_works": recent_works,
+        "evidence_note": (
+            "通讯作者身份来自 OpenAlex authorship 的 is_corresponding/corresponding_author_ids 字段。"
+            if authors else
+            "OpenAlex 未明确标注通讯作者；不得把末位作者自动当成通讯作者。请到论文原文核验。"
+        ),
+        "source": "OpenAlex",
     }
 
 
