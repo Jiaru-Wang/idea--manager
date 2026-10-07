@@ -1,4 +1,4 @@
-import type { AgentMode, AgentProvider, AgentRunResult, AgentRunSaveResult, AgentStatus, Attachment, Idea, Project, ProjectGroup, ReasoningEffort, Relation, ReviewData, SemanticOpportunity, SemanticStatus, Status, Suggestion, TagInfo, TagMapData } from './types'
+import type { AgentMode, AgentProvider, AgentRunResult, AgentRunSaveResult, AgentStatus, Attachment, Idea, PaperDiscoveryResult, Project, ProjectGroup, ReasoningEffort, Relation, ReviewData, SemanticOpportunity, SemanticStatus, Status, Suggestion, TagInfo, TagMapData } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -65,6 +65,7 @@ export const api = {
   semanticOpportunities: (params = new URLSearchParams()) => request<SemanticOpportunity[]>(`/semantic/opportunities?${params}`),
   review: (params = new URLSearchParams()) => request<ReviewData>(`/review?${params}`),
   agentStatus: () => request<AgentStatus>('/agent/status'),
+  discoverPapers: (params: URLSearchParams) => request<PaperDiscoveryResult>(`/papers/discover?${params}`),
   configureAgent: (data: { provider: AgentProvider; api_key: string; model: string; base_url: string; reasoning_effort: ReasoningEffort; remember_api_key: boolean }) => request<AgentStatus>('/agent/config', { method: 'POST', body: JSON.stringify(data) }),
   activateAgentProvider: (provider: AgentProvider) => request<AgentStatus>(`/agent/activate/${provider}`, { method: 'POST' }),
   forgetAgentProfile: (provider: AgentProvider) => request<AgentStatus>(`/agent/config/${provider}`, { method: 'DELETE' }),

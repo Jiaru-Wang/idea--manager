@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import html
 import json
 import hashlib
 import mimetypes
@@ -11,6 +13,7 @@ import subprocess
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -146,6 +149,13 @@ AGENT_PROVIDERS: dict[str, dict[str, Any]] = {
         "reasoning_efforts": ["none", "low", "medium", "xhigh"],
         "default_effort": "medium", "api_style": "responses", "api_key_required": True,
         "key_env": "DASHSCOPE_API_KEY", "model_env": "IDEAMINER_QWEN_MODEL", "web_search": False,
+    },
+    "minimax": {
+        "label": "MiniMax", "base_url": "https://api.minimaxi.com/v1", "model": "MiniMax-M2.7",
+        "models": ["MiniMax-M2.7", "MiniMax-Text-01"],
+        "reasoning_efforts": ["none"], "default_effort": "none",
+        "api_style": "chat_completions", "api_key_required": True,
+        "key_env": "MINIMAX_API_KEY", "model_env": "IDEAMINER_MINIMAX_MODEL", "web_search": False,
     },
     "local": {
         "label": "Local", "base_url": "http://127.0.0.1:11434/v1", "model": "gpt-oss:20b",
@@ -378,6 +388,45 @@ def _anthropic_result(result: dict[str, Any], provider_label: str) -> tuple[str,
     raise HTTPException(502, f"{provider_label} did not return a readable research result")
 
 
+def _structured_from_text(text: str) -> tuple[str, list[dict[str, Any]]] | None:
+    candidates = [text.strip()]
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fenced:
+        candidates.insert(0, fenced.group(1).strip())
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and "answer" in value:
+            proposals = value.get("proposals", [])
+            return str(value.get("answer", "")), proposals[:5] if isinstance(proposals, list) else []
+    return None
+
+
+def _chat_result(result: dict[str, Any], provider_label: str) -> tuple[str, list[dict[str, Any]]]:
+    choices = result.get("choices", [])
+    if not choices:
+        raise HTTPException(502, f"{provider_label} did not return a readable research result")
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else []
+    for tool_call in tool_calls:
+        function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
+        if function.get("name") == "submit_research_result":
+            try:
+                arguments = function.get("arguments", {})
+                structured = json.loads(arguments) if isinstance(arguments, str) else arguments
+                proposals = structured.get("proposals", [])
+                return str(structured.get("answer", "")), proposals[:5] if isinstance(proposals, list) else []
+            except (AttributeError, TypeError, ValueError) as error:
+                raise HTTPException(502, f"{provider_label} returned an unreadable structured result") from error
+    content = str(message.get("content") or "").strip() if isinstance(message, dict) else ""
+    if not content:
+        raise HTTPException(502, f"{provider_label} did not return a readable research result")
+    structured = _structured_from_text(content)
+    return structured if structured else (content, [])
+
+
 async def _call_agent_provider(config: dict[str, Any], *, model: str, reasoning_effort: str, instructions: str, input_text: str, web_search: bool = False) -> tuple[str, list[dict[str, Any]]]:
     provider, provider_label = str(config["provider"]), str(config["label"])
     api_key = str(config.get("api_key", "")).strip()
@@ -397,6 +446,25 @@ async def _call_agent_provider(config: dict[str, Any], *, model: str, reasoning_
         if reasoning_effort and reasoning_effort != "none":
             body["thinking"] = {"type": "adaptive"}
             body["output_config"] = {"effort": reasoning_effort}
+    elif config["api_style"] == "chat_completions":
+        if not endpoint.endswith("/chat/completions"):
+            endpoint += "/chat/completions"
+        headers["Authorization"] = f"Bearer {api_key}"
+        body = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        instructions
+                        + "\n\nReturn a compact JSON object with this shape: "
+                        + '{"answer":"...","proposals":[]}. '
+                        + "If you cannot create proposals, return an empty proposals array."
+                    ),
+                },
+                {"role": "user", "content": input_text},
+            ],
+        }
     else:
         if not endpoint.endswith("/responses"):
             endpoint += "/responses"
@@ -429,7 +497,11 @@ async def _call_agent_provider(config: dict[str, Any], *, model: str, reasoning_
             message = response.text
         raise HTTPException(502, f"{provider_label} request failed: {message}")
     result = response.json()
-    return _anthropic_result(result, provider_label) if config["api_style"] == "anthropic" else _response_result(result, provider_label)
+    if config["api_style"] == "anthropic":
+        return _anthropic_result(result, provider_label)
+    if config["api_style"] == "chat_completions":
+        return _chat_result(result, provider_label)
+    return _response_result(result, provider_label)
 
 
 async def _provider_agent(payload: AgentRunRequest, context: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str, str]:
@@ -511,6 +583,119 @@ def _agent_document(response_text: str, fallback_title: str) -> tuple[str, str]:
     return fallback_title[:240], text
 
 
+def _plain_text(value: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", value or ""))).strip()
+
+
+def _openalex_abstract(index: Any) -> str:
+    if not isinstance(index, dict):
+        return ""
+    words: list[tuple[int, str]] = []
+    for word, positions in index.items():
+        if isinstance(positions, list):
+            words.extend((int(position), str(word)) for position in positions if isinstance(position, int))
+    return " ".join(word for _, word in sorted(words))[:6000]
+
+
+def _paper_key(doi: str, title: str) -> str:
+    clean_doi = doi.lower().replace("https://doi.org/", "").strip()
+    if clean_doi:
+        return f"doi:{clean_doi}"
+    return "title:" + re.sub(r"[^\w]+", "", title.lower(), flags=re.UNICODE)
+
+
+def _venue_matches(venue: str, requested: list[str]) -> bool:
+    if not requested:
+        return True
+    normalized = re.sub(r"\s+", " ", venue.lower()).strip()
+    return any(item.lower() in normalized or normalized in item.lower() for item in requested if item.strip())
+
+
+def _paper_reasons(item: dict[str, Any], requested_venues: list[str], from_year: int) -> list[str]:
+    reasons: list[str] = []
+    if requested_venues and _venue_matches(str(item.get("venue", "")), requested_venues):
+        reasons.append("目标期刊/会议匹配")
+    if int(item.get("year") or 0) >= max(from_year, date.today().year - 1):
+        reasons.append("近两年发表")
+    citations = int(item.get("cited_by_count") or 0)
+    if citations >= 50:
+        reasons.append(f"已有 {citations} 次引用")
+    if item.get("abstract"):
+        reasons.append("含摘要，可直接进入分析")
+    return reasons or ["关键词相关"]
+
+
+def _openalex_papers(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    papers: list[dict[str, Any]] = []
+    for work in payload.get("results", []):
+        if not isinstance(work, dict):
+            continue
+        source = ((work.get("primary_location") or {}).get("source") or {})
+        authors = [
+            str((authorship.get("author") or {}).get("display_name", "")).strip()
+            for authorship in work.get("authorships", [])[:12]
+            if isinstance(authorship, dict)
+        ]
+        doi = str(work.get("doi") or "").replace("https://doi.org/", "")
+        papers.append({
+            "id": str(work.get("id") or doi or work.get("title") or ""),
+            "title": str(work.get("title") or "").strip(),
+            "abstract": _openalex_abstract(work.get("abstract_inverted_index")),
+            "publication_date": str(work.get("publication_date") or ""),
+            "year": int(work.get("publication_year") or 0),
+            "venue": str(source.get("display_name") or "").strip(),
+            "authors": [author for author in authors if author],
+            "doi": doi,
+            "url": str(work.get("doi") or (work.get("primary_location") or {}).get("landing_page_url") or work.get("id") or ""),
+            "cited_by_count": int(work.get("cited_by_count") or 0),
+            "open_access": bool((work.get("open_access") or {}).get("is_oa")),
+            "metadata_sources": ["OpenAlex"],
+        })
+    return [paper for paper in papers if paper["title"]]
+
+
+def _crossref_papers(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    papers: list[dict[str, Any]] = []
+    for work in (payload.get("message") or {}).get("items", []):
+        if not isinstance(work, dict):
+            continue
+        date_parts = ((work.get("published-print") or work.get("published-online") or work.get("issued") or {}).get("date-parts") or [[]])[0]
+        year = int(date_parts[0]) if date_parts else 0
+        authors = [
+            " ".join(part for part in [str(author.get("given") or "").strip(), str(author.get("family") or "").strip()] if part)
+            for author in work.get("author", [])[:12]
+            if isinstance(author, dict)
+        ]
+        title = str((work.get("title") or [""])[0]).strip()
+        doi = str(work.get("DOI") or "").strip()
+        papers.append({
+            "id": doi or title,
+            "title": title,
+            "abstract": _plain_text(str(work.get("abstract") or ""))[:6000],
+            "publication_date": "-".join(str(part) for part in date_parts),
+            "year": year,
+            "venue": str((work.get("container-title") or [""])[0]).strip(),
+            "authors": [author for author in authors if author],
+            "doi": doi,
+            "url": str(work.get("URL") or (f"https://doi.org/{doi}" if doi else "")),
+            "cited_by_count": int(work.get("is-referenced-by-count") or 0),
+            "open_access": bool(work.get("license")),
+            "metadata_sources": ["Crossref"],
+        })
+    return [paper for paper in papers if paper["title"]]
+
+
+async def _academic_json(client: httpx.AsyncClient, url: str, params: dict[str, Any]) -> dict[str, Any]:
+    response = await client.get(url, params=params, headers={"User-Agent": "IdeaMiner/0.1 scholarly-discovery"})
+    response.raise_for_status()
+    if len(response.content) > 2_000_000:
+        raise ValueError("academic metadata response exceeded 2 MB")
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError("academic metadata response was not an object")
+    return data
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
@@ -529,6 +714,85 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/papers/discover")
+async def discover_papers(
+    q: str = Query(min_length=2, max_length=300),
+    venues: str = Query(default="", max_length=500),
+    from_year: int = Query(default=max(1900, date.today().year - 3), ge=1900, le=date.today().year + 1),
+    limit: int = Query(default=12, ge=1, le=25),
+) -> dict[str, Any]:
+    requested_venues = [item.strip() for item in re.split(r"[,;；，\n]+", venues) if item.strip()][:8]
+    fetch_size = min(max(limit * 4, 25), 100)
+    filters = f"from_publication_date:{from_year}-01-01,to_publication_date:{date.today().year + 1}-12-31,type:article"
+    openalex_params: dict[str, Any] = {
+        "search": q.strip(), "filter": filters, "sort": "relevance_score:desc",
+        "per_page": fetch_size,
+    }
+    if os.environ.get("OPENALEX_API_KEY", "").strip():
+        openalex_params["api_key"] = os.environ["OPENALEX_API_KEY"].strip()
+    crossref_params = {
+        "query.bibliographic": q.strip(),
+        "filter": f"from-pub-date:{from_year}-01-01,type:journal-article",
+        "sort": "relevance", "order": "desc", "rows": fetch_size,
+        "select": "DOI,title,abstract,published-print,published-online,issued,author,container-title,URL,is-referenced-by-count,license",
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12.0), follow_redirects=True) as client:
+        responses = await asyncio.gather(
+            _academic_json(client, "https://api.openalex.org/works", openalex_params),
+            _academic_json(client, "https://api.crossref.org/works", crossref_params),
+            return_exceptions=True,
+        )
+
+    warnings: list[str] = []
+    source_papers: list[list[dict[str, Any]]] = []
+    parsers = [("OpenAlex", _openalex_papers), ("Crossref", _crossref_papers)]
+    for response, (name, parser) in zip(responses, parsers):
+        if isinstance(response, BaseException):
+            warnings.append(f"{name} 暂时不可用，已使用其余来源。")
+        else:
+            source_papers.append(parser(response))
+    if not source_papers:
+        raise HTTPException(502, "论文元数据服务暂时不可用，请稍后重试。")
+
+    merged: dict[str, dict[str, Any]] = {}
+    for papers in source_papers:
+        for paper in papers:
+            if paper["year"] and paper["year"] < from_year:
+                continue
+            if requested_venues and not _venue_matches(paper["venue"], requested_venues):
+                continue
+            key = _paper_key(paper["doi"], paper["title"])
+            existing = merged.get(key)
+            if existing:
+                if len(paper["abstract"]) > len(existing["abstract"]):
+                    existing["abstract"] = paper["abstract"]
+                existing["authors"] = existing["authors"] or paper["authors"]
+                existing["venue"] = existing["venue"] or paper["venue"]
+                existing["doi"] = existing["doi"] or paper["doi"]
+                existing["url"] = existing["url"] or paper["url"]
+                existing["cited_by_count"] = max(existing["cited_by_count"], paper["cited_by_count"])
+                existing["open_access"] = existing["open_access"] or paper["open_access"]
+                existing["metadata_sources"] = sorted(set(existing["metadata_sources"] + paper["metadata_sources"]))
+            else:
+                merged[key] = paper
+
+    query_tokens = {token for token in re.findall(r"[\w-]+", q.lower(), flags=re.UNICODE) if len(token) > 1}
+    papers = list(merged.values())
+    for paper in papers:
+        title_tokens = set(re.findall(r"[\w-]+", paper["title"].lower(), flags=re.UNICODE))
+        overlap = len(query_tokens & title_tokens) / max(len(query_tokens), 1)
+        paper["match_reasons"] = _paper_reasons(paper, requested_venues, from_year)
+        paper["rank_score"] = round(overlap * 10 + min(paper["cited_by_count"], 250) / 100 + paper["year"] / 10_000, 4)
+    papers.sort(key=lambda item: (item["rank_score"], item["publication_date"]), reverse=True)
+    for paper in papers:
+        paper.pop("rank_score", None)
+    return {
+        "query": q.strip(), "venues": requested_venues, "from_year": from_year,
+        "papers": papers[:limit], "warnings": warnings,
+        "sources": [name for response, (name, _) in zip(responses, parsers) if not isinstance(response, BaseException)],
+    }
 
 
 @app.get("/api/library-state")

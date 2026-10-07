@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, SecretStr, field_validator
 
 
 Status = Literal["seed", "exploring", "promising", "parked"]
-AgentProvider = Literal["openai", "anthropic", "deepseek", "qwen", "local", "custom"]
+AgentProvider = Literal["openai", "anthropic", "deepseek", "qwen", "minimax", "local", "custom"]
 ReasoningEffort = Literal["", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 

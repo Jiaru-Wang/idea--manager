@@ -8,6 +8,7 @@ handle.close()
 os.environ["IDEAMINER_DB"] = handle.name
 os.environ.pop("OPENAI_API_KEY", None)
 os.environ.pop("DEEPSEEK_API_KEY", None)
+os.environ.pop("MINIMAX_API_KEY", None)
 os.environ.pop("IDEAMINER_AGENT_PROVIDER", None)
 os.environ.pop("IDEAMINER_AGENT_API_KEY", None)
 os.environ.pop("IDEAMINER_AGENT_BASE_URL", None)
@@ -86,6 +87,138 @@ def test_deepseek_responses_provider(monkeypatch):
         client.delete(f"/api/ideas/{child['id']}", params={"permanent": True})
         client.delete(f"/api/ideas/{parent['id']}", params={"permanent": True})
         client.delete("/api/agent/config")
+
+
+def test_minimax_chat_completions_provider(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "answer": "# MiniMax synthesis\n\nA structured result.",
+                            "proposals": [],
+                        })
+                    }
+                }]
+            }
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def post(self, url, headers, json):
+            captured.update({"url": url, "headers": headers, "body": json})
+            return FakeResponse()
+
+    monkeypatch.setattr("backend.app.main.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        configured = client.post("/api/agent/config", json={
+            "provider": "minimax",
+            "api_key": "minimax-test-key",
+            "model": "MiniMax-M2.7",
+            "remember_api_key": False,
+        })
+        assert configured.status_code == 200
+        result = client.post("/api/agent/runs", json={
+            "prompt": "Analyze this paper",
+            "mode": "synthesize",
+            "scope_type": "all",
+        })
+        assert result.status_code == 200
+        assert result.json()["provider"] == "minimax"
+        assert result.json()["answer"].startswith("# MiniMax synthesis")
+        assert captured["url"] == "https://api.minimaxi.com/v1/chat/completions"
+        assert captured["headers"]["Authorization"] == "Bearer minimax-test-key"
+        assert captured["body"]["model"] == "MiniMax-M2.7"
+        assert captured["body"]["messages"][0]["role"] == "system"
+        assert "minimax-test-key" not in str(result.json())
+        client.delete("/api/agent/config/minimax")
+
+
+def test_paper_discovery_merges_official_metadata_sources(monkeypatch):
+    openalex = {
+        "results": [{
+            "id": "https://openalex.org/W1",
+            "title": "Robust cross-subject EEG emotion recognition",
+            "abstract_inverted_index": {"A": [0], "robust": [1], "method": [2]},
+            "publication_date": "2025-06-01",
+            "publication_year": 2025,
+            "primary_location": {"source": {"display_name": "Nature Neuroscience"}, "landing_page_url": "https://example.org/paper"},
+            "authorships": [{"author": {"display_name": "Jia Researcher"}}],
+            "doi": "https://doi.org/10.1000/eeg.1",
+            "cited_by_count": 60,
+            "open_access": {"is_oa": True},
+        }]
+    }
+    crossref = {
+        "message": {"items": [{
+            "DOI": "10.1000/eeg.1",
+            "title": ["Robust cross-subject EEG emotion recognition"],
+            "abstract": "<jats:p>A longer structured abstract for direct analysis.</jats:p>",
+            "published-online": {"date-parts": [[2025, 6, 1]]},
+            "author": [{"given": "Jia", "family": "Researcher"}],
+            "container-title": ["Nature Neuroscience"],
+            "URL": "https://doi.org/10.1000/eeg.1",
+            "is-referenced-by-count": 55,
+            "license": [{"URL": "https://creativecommons.org/licenses/by/4.0/"}],
+        }]}
+    }
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def get(self, url, params, headers):
+            assert params
+            assert headers["User-Agent"].startswith("IdeaMiner/")
+            return FakeResponse(openalex if "openalex" in url else crossref)
+
+    monkeypatch.setattr("backend.app.main.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        response = client.get("/api/papers/discover", params={
+            "q": "EEG emotion recognition",
+            "venues": "Nature Neuroscience",
+            "from_year": 2024,
+        })
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["sources"] == ["OpenAlex", "Crossref"]
+        assert len(payload["papers"]) == 1
+        paper = payload["papers"][0]
+        assert paper["doi"] == "10.1000/eeg.1"
+        assert paper["metadata_sources"] == ["Crossref", "OpenAlex"]
+        assert paper["abstract"] == "A longer structured abstract for direct analysis."
+        assert "目标期刊/会议匹配" in paper["match_reasons"]
 
 
 def test_anthropic_messages_provider(monkeypatch):

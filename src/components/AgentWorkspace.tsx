@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, FileText, GitBranch, Globe2, KeyRound, LoaderCircle, Paperclip, Save, ShieldCheck, Sparkles, X } from 'lucide-react'
 import { api } from '../api'
 import { IdeaMarkdown } from './IdeaMarkdown'
@@ -53,6 +53,7 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
   const [savedResult, setSavedResult] = useState<AgentRunSaveResult | null>(null)
   const [availableFiles, setAvailableFiles] = useState<Attachment[]>([])
   const [selectedFileIds, setSelectedFileIds] = useState<number[]>([])
+  const feedbackRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     api.agentStatus().then(value => {
@@ -70,6 +71,10 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
     else if (scope.type === 'group') params.set('group_id', String(scope.id))
     api.attachments(params).then(files => { setAvailableFiles(files); setSelectedFileIds([]) }).catch(() => setAvailableFiles([]))
   }, [contextIdea?.id, scope.type, scope.type === 'all' ? null : scope.id])
+
+  useEffect(() => {
+    if (result || error) feedbackRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [error, result])
 
   const contextName = useMemo(() => {
     if (contextIdea) return `Idea: ${contextIdea.title}`
@@ -166,7 +171,7 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
             <label>Model{activeProfile?.models.length ? <select value={connectionModel} onChange={event => setConnectionModel(event.target.value)}>{!activeProfile.models.includes(connectionModel) && <option value={connectionModel}>{connectionModel}</option>}{activeProfile.models.map(item => <option value={item} key={item}>{item}</option>)}</select> : <input value={connectionModel} onChange={event => setConnectionModel(event.target.value)} placeholder="Local model name"/>}</label>
             <label>Thinking effort<select value={connectionReasoningEffort} onChange={event => setConnectionReasoningEffort(event.target.value as ReasoningEffort)}>{activeProfile?.reasoning_efforts.map(item => <option value={item} key={item}>{item === 'none' ? 'None / fastest' : item}</option>)}</select></label>
             <label>Base URL<input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="https://provider.example/v1"/></label>
-            <p className="agent-provider-note">IdeaMiner uses Anthropic Messages for Anthropic and an OpenAI-compatible Responses endpoint for the other tabs. A local server normally uses <code>http://127.0.0.1:11434/v1</code>.</p>
+            <p className="agent-provider-note">IdeaMiner uses Anthropic Messages for Anthropic, Chat Completions for MiniMax, and an OpenAI-compatible Responses endpoint for the remaining tabs. A local server normally uses <code>http://127.0.0.1:11434/v1</code>.</p>
             <label className="agent-remember"><input type="checkbox" checked={rememberApiKey} disabled={!status.credential_store_available || !apiKey.trim() && !activeProfile?.credential_stored} onChange={event => setRememberApiKey(event.target.checked)}/> Remember this credential in the operating system vault</label>
             <div className="agent-connect-actions">{status.configured && <button className="button secondary small" onClick={() => setEditingConnection(false)}>Cancel</button>}<button className="button primary small" disabled={connecting || !keyReady || !connectionModel.trim() || !baseUrl.trim()} onClick={connect}>{connecting ? <LoaderCircle className="spin" size={15}/> : <KeyRound size={15}/>} Save profile</button></div>
             <small><ShieldCheck size={13}/> Keys are never stored in SQLite, browser storage, exports, or the profile file. {!status.credential_store_available && 'Secure OS storage is unavailable, so new keys remain session-only.'}</small>
@@ -180,6 +185,7 @@ export function AgentWorkspace({ scope, contextIdea, ideas, projects, groups, on
         <button className="button primary agent-run" disabled={running || !prompt.trim()} onClick={run}>{running ? <><LoaderCircle className="spin" size={17}/> Researching…</> : <><Sparkles size={17}/> Run agent</>}</button>
         </>}
       </>}
+      {(error || result) && <div ref={feedbackRef}/>}
       {error && <div className="error-banner agent-error">{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
       {result && <div className="agent-result">
         <div className="agent-result-meta"><span>{result.provider}</span><span>{result.model}</span><span>{result.context_summary.ideas} ideas · {result.context_summary.relations} relations · {result.context_summary.files} files</span><span>Raw captures not shared</span></div>

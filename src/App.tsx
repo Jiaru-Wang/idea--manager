@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ClipboardCheck, CloudMoon, Copy, Download, Folder, FolderInput, FolderPlus, GitFork, Layers3, LayoutGrid, Lightbulb, Link2, List, ListFilter, Maximize2, Minimize2, Paperclip, Plus, Power, RefreshCw, Route, Search, Settings2, Sparkles, Sprout, Trash2, Upload, X } from 'lucide-react'
+import { BookOpenText, ClipboardCheck, CloudMoon, Copy, Download, Folder, FolderInput, FolderPlus, GitFork, Layers3, LayoutGrid, Lightbulb, Link2, List, ListFilter, Maximize2, Minimize2, Paperclip, Plus, Power, RefreshCw, Route, Search, Settings2, Sparkles, Sprout, Trash2, Upload, X } from 'lucide-react'
 import { api, type ImportPreview, type ImportResult } from './api'
 import { AgentWorkspace } from './components/AgentWorkspace'
 import { AttachmentPanel } from './components/AttachmentPanel'
@@ -9,6 +9,7 @@ import { IdeaEditor } from './components/IdeaEditor'
 import { IdeaMarkdown, resolveIdeaReferencePlainText } from './components/IdeaMarkdown'
 import { ImportDialog } from './components/ImportDialog'
 import { LineageView } from './components/LineageView'
+import { PaperWorkspace } from './components/PaperWorkspace'
 import { ProjectManager } from './components/ProjectManager'
 import { RelationForm } from './components/RelationForm'
 import { ReviewDashboard } from './components/ReviewDashboard'
@@ -62,6 +63,7 @@ export default function App() {
   const [agentContext, setAgentContext] = useState<Idea | null | undefined>(undefined)
   const [reviewOpen, setReviewOpen] = useState(false)
   const [dreamOpen, setDreamOpen] = useState(false)
+  const [paperOpen, setPaperOpen] = useState(false)
   const [dreamIdeaIds, setDreamIdeaIds] = useState<number[]>([])
   const [managingTags, setManagingTags] = useState(false)
   const importInput = useRef<HTMLInputElement>(null)
@@ -299,6 +301,7 @@ export default function App() {
       <div className="brand"><div className="brand-mark"><Sprout size={22}/></div><div><strong>IdeaMiner</strong><span>research idea garden</span></div></div>
       <div className="top-actions">
         <button className="button agent-button" onClick={() => setAgentContext(null)}><Sparkles size={16}/> Agent</button>
+        <button className="button paper-button" onClick={() => setPaperOpen(true)}><BookOpenText size={16}/> Paper Lab</button>
         <button className="button dream-button" onClick={() => setDreamOpen(true)}><CloudMoon size={16}/> Dream{dreamIdeaIds.length ? ` · ${dreamIdeaIds.length}` : ''}</button>
         <button className="button ghost" onClick={() => setReviewOpen(true)}><ClipboardCheck size={16}/> Review</button>
         <button className="button projects-button" onClick={() => setManagingProjects(true)}><FolderPlus size={16}/> Projects</button>
@@ -363,10 +366,10 @@ export default function App() {
       </section>
     </main>
 
-    {editor && <IdeaEditor idea={editor === 'new' ? null : editor} projects={projects} defaultProjectId={defaultProjectId} ideas={allIdeas} onClose={() => setEditor(null)} onSave={saveIdea}/>} 
-    {managingProjects && <ProjectManager groups={projectGroups} onClose={() => setManagingProjects(false)} onCreateProject={createProject} onCreateGroup={createProjectGroup}/>} 
-    {importState && <ImportDialog filename={importState.filename} preview={importState.preview} onClose={() => setImportState(null)} onImport={runImport}/>} 
-    {managingTags && <TagManager visibleIdeaIds={ideas.map(idea => idea.id)} scope={scope} onClose={() => setManagingTags(false)} onChanged={refresh} onFilterTag={name => { setActiveTags([name]); setManagingTags(false) }}/>} 
+    {editor && <IdeaEditor idea={editor === 'new' ? null : editor} projects={projects} defaultProjectId={defaultProjectId} ideas={allIdeas} onClose={() => setEditor(null)} onSave={saveIdea}/>}
+    {managingProjects && <ProjectManager groups={projectGroups} onClose={() => setManagingProjects(false)} onCreateProject={createProject} onCreateGroup={createProjectGroup}/>}
+    {importState && <ImportDialog filename={importState.filename} preview={importState.preview} onClose={() => setImportState(null)} onImport={runImport}/>}
+    {managingTags && <TagManager visibleIdeaIds={ideas.map(idea => idea.id)} scope={scope} onClose={() => setManagingTags(false)} onChanged={refresh} onFilterTag={name => { setActiveTags([name]); setManagingTags(false) }}/>}
     {selected && (view !== 'focus' || detailFullscreen) && <div className={`drawer-backdrop ${detailFullscreen ? 'detail-fullscreen-backdrop' : ''}`} onMouseDown={e => e.target === e.currentTarget && (detailFullscreen ? setDetailFullscreen(false) : setSelected(null))}><aside className={`detail-drawer ${detailFullscreen ? 'fullscreen' : ''}`}>
       <header><label className={`status-pill status-picker ${selected.status}`}><span/><select value={selected.status} onChange={event => void changeIdeaStatus(event.target.value as Status)} aria-label="Change idea status">{(Object.keys(statusLabels) as Status[]).map(value => <option value={value} key={value}>{statusLabels[value]}</option>)}</select></label><div><button className="icon-button" aria-label={detailFullscreen ? 'Restore idea drawer' : 'View idea full screen'} title={detailFullscreen ? 'Restore drawer' : 'View full screen'} onClick={() => setDetailFullscreen(value => !value)}>{detailFullscreen ? <Minimize2 size={17}/> : <Maximize2 size={17}/>}</button><button className="icon-button danger" title={projects.find(project => project.id === selected.project_id)?.system_key === 'recycle' ? 'Delete permanently' : 'Move to recycle'} onClick={() => removeIdea(selected.id)}><Trash2 size={17}/></button><button className="icon-button" aria-label="Close idea" onClick={() => detailFullscreen && view === 'focus' ? setDetailFullscreen(false) : setSelected(null)}><X size={20}/></button></div></header>
       <h1>{selected.title}</h1><div className="detail-tags">{selected.tags.map(t => <span className="tag" style={styleForTag(t)} key={t}>#{t}</span>)}</div>
@@ -379,9 +382,10 @@ export default function App() {
       <section className="detail-section"><h3><Sprout size={16}/> Related ideas</h3>{suggestions.length ? suggestions.map(item => <button className="suggestion" key={item.id} onClick={() => openIdea(item.id)}><strong>{item.title}</strong><span>{item.reason}</span></button>) : <p className="empty-small">Add tags or richer notes to surface connections.</p>}</section>
       <details className="original"><summary>Original capture</summary><pre>{selected.raw_text}</pre></details>
     </aside></div>}
-    {agentContext !== undefined && <AgentWorkspace scope={scope} contextIdea={agentContext} ideas={allIdeas} projects={projects} groups={projectGroups} onClose={() => setAgentContext(undefined)} onChanged={refresh} onIdeaSelect={id => { setAgentContext(undefined); void openIdea(id) }}/>} 
-    {reviewOpen && <ReviewDashboard scope={scope} scopeTitle={scopeTitle} onClose={() => setReviewOpen(false)} onChanged={refresh} onIdeaSelect={id => { setReviewOpen(false); void openIdea(id) }}/>} 
-    {dreamOpen && <DreamWorkspace ideaIds={dreamIdeaIds} ideas={allIdeas} projects={projects} onClose={() => setDreamOpen(false)} onRemove={id => setDreamIdeaIds(current => current.filter(item => item !== id))} onChanged={refresh} onIdeaSelect={id => { setDreamOpen(false); void openIdea(id) }} onOpenAgent={() => { setDreamOpen(false); setAgentContext(null) }}/>} 
+    {agentContext !== undefined && <AgentWorkspace scope={scope} contextIdea={agentContext} ideas={allIdeas} projects={projects} groups={projectGroups} onClose={() => setAgentContext(undefined)} onChanged={refresh} onIdeaSelect={id => { setAgentContext(undefined); void openIdea(id) }}/>}
+    {paperOpen && <PaperWorkspace scope={scope} ideas={allIdeas} projects={projects} groups={projectGroups} onClose={() => setPaperOpen(false)} onChanged={refresh} onOpenAgent={() => { setPaperOpen(false); setAgentContext(null) }} onIdeaSelect={id => { setPaperOpen(false); void openIdea(id) }}/>}
+    {reviewOpen && <ReviewDashboard scope={scope} scopeTitle={scopeTitle} onClose={() => setReviewOpen(false)} onChanged={refresh} onIdeaSelect={id => { setReviewOpen(false); void openIdea(id) }}/>}
+    {dreamOpen && <DreamWorkspace ideaIds={dreamIdeaIds} ideas={allIdeas} projects={projects} onClose={() => setDreamOpen(false)} onRemove={id => setDreamIdeaIds(current => current.filter(item => item !== id))} onChanged={refresh} onIdeaSelect={id => { setDreamOpen(false); void openIdea(id) }} onOpenAgent={() => { setDreamOpen(false); setAgentContext(null) }}/>}
     <button className={`dream-dock ${dreamIdeaIds.length ? 'ready' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addDreamIdea(Number(event.dataTransfer.getData('application/x-ideaminer-idea'))) }} onClick={() => setDreamOpen(true)}><CloudMoon size={18}/><span>{dreamIdeaIds.length ? `${dreamIdeaIds.length} idea${dreamIdeaIds.length === 1 ? '' : 's'} ready to Dream` : 'Drag ideas here to Dream'}</span></button>
     {stopped && <div className="shutdown-screen"><div className="shutdown-card"><div className="brand-mark"><Sprout size={25}/></div><p className="eyebrow">SHUTDOWN COMPLETE</p><h1>IdeaMiner has stopped.</h1><p>Your ideas are safely stored in SQLite. You can close this browser tab and double-click <code>start-ideaminer.bat</code> whenever you want to return.</p></div></div>}
   </div>

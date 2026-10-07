@@ -73,7 +73,7 @@ export interface TagMapData {
 }
 
 export type AgentMode = 'explore' | 'elaborate' | 'critique' | 'connect' | 'synthesize'
-export type AgentProvider = 'openai' | 'anthropic' | 'deepseek' | 'qwen' | 'local'
+export type AgentProvider = 'openai' | 'anthropic' | 'deepseek' | 'qwen' | 'minimax' | 'local'
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface AgentProviderOption {
@@ -132,6 +132,31 @@ export interface AgentRunSaveResult {
   idea: Idea
   parent_id: number
   relation_id: number | null
+}
+
+export interface DiscoveredPaper {
+  id: string
+  title: string
+  abstract: string
+  publication_date: string
+  year: number
+  venue: string
+  authors: string[]
+  doi: string
+  url: string
+  cited_by_count: number
+  open_access: boolean
+  metadata_sources: string[]
+  match_reasons: string[]
+}
+
+export interface PaperDiscoveryResult {
+  query: string
+  venues: string[]
+  from_year: number
+  papers: DiscoveredPaper[]
+  warnings: string[]
+  sources: string[]
 }
 
 export interface SemanticStatus {
