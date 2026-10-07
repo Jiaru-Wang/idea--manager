@@ -281,6 +281,15 @@ def test_paper_context_uses_explicit_corresponding_author_metadata(monkeypatch):
         "results": [{
             "id": "https://openalex.org/W1",
             "title": "A cross-disciplinary mechanism paper",
+            "abstract_inverted_index": {"A": [0], "causal": [1], "study": [2]},
+            "publication_year": 2025,
+            "publication_date": "2025-03-12",
+            "doi": "https://doi.org/10.1000/example",
+            "primary_location": {
+                "source": {"display_name": "Example Journal"},
+                "landing_page_url": "https://example.org/article",
+            },
+            "best_oa_location": {"pdf_url": "https://example.org/article.pdf"},
             "corresponding_author_ids": ["https://openalex.org/A1"],
             "authorships": [
                 {
@@ -347,6 +356,202 @@ def test_paper_context_uses_explicit_corresponding_author_metadata(monkeypatch):
         assert payload["corresponding_authors"][0]["institution"] == "Example University"
         assert [work["title"] for work in payload["recent_works"]] == ["Earlier mechanism study"]
         assert "is_corresponding" in payload["evidence_note"]
+        assert payload["venue"] == "Example Journal"
+        assert payload["publication_year"] == 2025
+        assert payload["abstract"] == "A causal study"
+        assert payload["doi"] == "10.1000/example"
+        assert payload["url"] == "https://doi.org/10.1000/example"
+        assert payload["pdf_url"] == "https://example.org/article.pdf"
+        assert payload["authors"] == ["Lead Corresponding", "Last Author"]
+
+
+def test_paper_context_fills_missing_abstract_from_semantic_scholar(monkeypatch):
+    openalex = {
+        "results": [{
+            "id": "https://openalex.org/W3",
+            "title": "An EEG foundation model",
+            "publication_year": 2026,
+            "publication_date": "2026-05-01",
+            "doi": "https://doi.org/10.1000/eeg-foundation",
+            "primary_location": {"source": {"display_name": "Neural Systems"}},
+            "authorships": [{"author": {"display_name": "Research Author"}}],
+            "corresponding_author_ids": [],
+        }]
+    }
+    semantic = {
+        "title": "An EEG foundation model",
+        "abstract": "A complete abstract supplied by the metadata fallback.",
+        "venue": "Neural Systems",
+        "year": 2026,
+        "authors": [{"name": "Research Author"}],
+        "url": "https://www.semanticscholar.org/paper/W3",
+        "openAccessPdf": {"url": "https://example.org/eeg-foundation.pdf"},
+    }
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def get(self, url, params, headers):
+            return FakeResponse(semantic if "semanticscholar" in url else openalex)
+
+    monkeypatch.setattr("backend.app.main.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        response = client.get("/api/papers/context", params={
+            "title": "An EEG foundation model",
+            "locator": "https://doi.org/10.1000/eeg-foundation",
+        })
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["abstract"] == semantic["abstract"]
+        assert payload["pdf_url"] == semantic["openAccessPdf"]["url"]
+        assert payload["url"] == "https://doi.org/10.1000/eeg-foundation"
+        assert payload["source"] == "OpenAlex + Semantic Scholar"
+
+
+def test_paper_context_fills_missing_abstract_from_pubmed(monkeypatch):
+    openalex = {
+        "results": [{
+            "id": "https://openalex.org/W4",
+            "title": "A biomedical EEG paper",
+            "publication_year": 2026,
+            "publication_date": "2026-06-01",
+            "doi": "https://doi.org/10.1000/pubmed-eeg",
+            "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/12345678"},
+            "primary_location": {"source": {"display_name": "Neural Medicine"}},
+            "authorships": [{"author": {"display_name": "Research Author"}}],
+            "corresponding_author_ids": [],
+        }]
+    }
+    pubmed_xml = """<PubmedArticleSet><PubmedArticle><MedlineCitation><Article><Abstract>
+        <AbstractText Label="BACKGROUND">The verified background.</AbstractText>
+        <AbstractText Label="RESULTS">The verified result.</AbstractText>
+    </Abstract></Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"""
+
+    class FakeResponse:
+        def __init__(self, payload=None, text=""):
+            self.payload = payload
+            self.text = text
+            self.content = text.encode() if text else b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def get(self, url, params, headers):
+            if "eutils.ncbi.nlm.nih.gov" in url:
+                assert params["id"] == "12345678"
+                return FakeResponse(text=pubmed_xml)
+            return FakeResponse(payload=openalex)
+
+    monkeypatch.setattr("backend.app.main.httpx.AsyncClient", FakeClient)
+    with TestClient(app) as client:
+        response = client.get("/api/papers/context", params={
+            "title": "A biomedical EEG paper",
+            "locator": "https://doi.org/10.1000/pubmed-eeg",
+        })
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["abstract"] == "BACKGROUND: The verified background. RESULTS: The verified result."
+        assert payload["source"] == "OpenAlex + PubMed"
+
+
+def test_paper_enrichment_translates_and_classifies_without_inventing(monkeypatch):
+    monkeypatch.setattr("backend.app.main._active_agent_config", lambda: {
+        "configured": True,
+        "provider": "minimax",
+        "label": "MiniMax",
+        "model": "MiniMax-M2.7",
+    })
+
+    async def fake_provider(*_, **__):
+        return (json.dumps({
+            "title_zh": "基于 Mamba 的脑电基础模型",
+            "venue_zh": "神经网络",
+            "abstract_zh": "这是对已提供英文摘要的忠实翻译。",
+            "study_type": "foundation_model",
+            "domain_zh": "脑电基础模型",
+            "cross_domain_clues_zh": "状态空间模型与神经动力学之间的结构映射。",
+            "goal_zh": "理解强逻辑并完成复现。",
+            "journal_profile": "foundation_model",
+            "author_direction_summary_zh": "该团队持续研究脑电表征学习，近期从任务模型转向跨任务基础模型。",
+        }, ensure_ascii=False), [])
+
+    monkeypatch.setattr("backend.app.main._call_agent_provider", fake_provider)
+    with TestClient(app) as client:
+        response = client.post("/api/papers/enrich", json={
+            "title": "An EEG foundation model with Mamba",
+            "venue": "Neural Networks",
+            "abstract": "A supplied abstract.",
+            "topic": "EEG foundation model",
+            "scholarly_context": "明确通讯作者：A。近年论文：2024 EEG representation；2025 EEG foundation model。",
+        })
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["title_zh"] == "基于 Mamba 的脑电基础模型"
+        assert payload["abstract_zh"] == "这是对已提供英文摘要的忠实翻译。"
+        assert payload["study_type"] == "foundation_model"
+        assert payload["journal_profile"] == "foundation_model"
+        assert payload["author_direction_summary_zh"].startswith("该团队持续研究")
+
+
+def test_paper_enrichment_accepts_minimax_thinking_wrapper(monkeypatch):
+    monkeypatch.setattr("backend.app.main._active_agent_config", lambda: {
+        "configured": True,
+        "provider": "minimax",
+        "label": "MiniMax",
+        "model": "MiniMax-M2.7",
+    })
+
+    async def fake_provider(*_, **__):
+        return ('<think>internal reasoning</think>\n'
+                '{"answer":{"title_zh":"中文题目","venue_zh":"中文期刊",'
+                '"abstract_zh":"中文摘要","study_type":"computational",'
+                '"domain_zh":"计算神经科学","cross_domain_clues_zh":"动力系统",'
+                '"goal_zh":"完成复现","journal_profile":"ai_engineering",'
+                '"author_direction_summary_zh":"持续研究计算神经科学方法。"},"proposals":[]}', [])
+
+    monkeypatch.setattr("backend.app.main._call_agent_provider", fake_provider)
+    with TestClient(app) as client:
+        response = client.post("/api/papers/enrich", json={
+            "title": "English title",
+            "venue": "English venue",
+            "abstract": "English abstract.",
+            "topic": "EEG",
+        })
+        assert response.status_code == 200
+        assert response.json()["title_zh"] == "中文题目"
+        assert response.json()["journal_profile"] == "ai_engineering"
+        assert response.json()["author_direction_summary_zh"] == "持续研究计算神经科学方法。"
 
 
 def test_anthropic_messages_provider(monkeypatch):

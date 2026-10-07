@@ -12,11 +12,12 @@ import sqlite3
 import subprocess
 import sys
 import uuid
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
@@ -24,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .agent_profiles import CredentialStoreError, credential_store_available, delete_api_key, get_api_key, load_store, reset_profile, save_api_key, save_profile, set_active_provider
 from .database import db, init_db
-from .schemas import AgentConnectionCreate, AgentProposalResolution, AgentResultSave, AgentRunRequest, AttachmentCreate, CodexCheckpointCreate, DreamRunRequest, ImportPreviewRequest, ImportRequest, IdeaCreate, IdeaUpdate, PathChoice, ProjectAssignment, ProjectCreate, ProjectGroupCreate, RelationCreate, TagBulkUpdate, TagMerge, TagRename, TagSettingsUpdate
+from .schemas import AgentConnectionCreate, AgentProposalResolution, AgentResultSave, AgentRunRequest, AttachmentCreate, CodexCheckpointCreate, DreamRunRequest, ImportPreviewRequest, ImportRequest, IdeaCreate, IdeaUpdate, PaperEnrichmentRequest, PathChoice, ProjectAssignment, ProjectCreate, ProjectGroupCreate, RelationCreate, TagBulkUpdate, TagMerge, TagRename, TagSettingsUpdate
 from .semantic import DIMENSIONS as SEMANTIC_DIMENSIONS, MODEL as SEMANTIC_MODEL, rebuild as rebuild_semantic_index, similarity as semantic_similarity
 
 
@@ -388,19 +389,30 @@ def _anthropic_result(result: dict[str, Any], provider_label: str) -> tuple[str,
     raise HTTPException(502, f"{provider_label} did not return a readable research result")
 
 
-def _structured_from_text(text: str) -> tuple[str, list[dict[str, Any]]] | None:
+def _json_values(text: str) -> list[Any]:
     candidates = [text.strip()]
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
     if fenced:
         candidates.insert(0, fenced.group(1).strip())
+    decoder = json.JSONDecoder()
+    candidates.extend(text[index:] for index, character in enumerate(text) if character == "{")
+    values: list[Any] = []
     for candidate in candidates:
         try:
-            value = json.loads(candidate)
+            value, _ = decoder.raw_decode(candidate)
         except ValueError:
             continue
+        values.append(value)
+    return values
+
+
+def _structured_from_text(text: str) -> tuple[str, list[dict[str, Any]]] | None:
+    for value in _json_values(text):
         if isinstance(value, dict) and "answer" in value:
             proposals = value.get("proposals", [])
-            return str(value.get("answer", "")), proposals[:5] if isinstance(proposals, list) else []
+            answer = value.get("answer", "")
+            answer_text = json.dumps(answer, ensure_ascii=False) if isinstance(answer, (dict, list)) else str(answer)
+            return answer_text, proposals[:5] if isinstance(proposals, list) else []
     return None
 
 
@@ -595,6 +607,30 @@ def _openalex_abstract(index: Any) -> str:
         if isinstance(positions, list):
             words.extend((int(position), str(word)) for position in positions if isinstance(position, int))
     return " ".join(word for _, word in sorted(words))[:6000]
+
+
+def _pubmed_abstract(xml_text: str) -> str:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return ""
+    parts: list[str] = []
+    for node in root.findall(".//Abstract/AbstractText"):
+        text = " ".join("".join(node.itertext()).split())
+        label = str(node.attrib.get("Label") or "").strip()
+        if text:
+            parts.append(f"{label}: {text}" if label else text)
+    return " ".join(parts)[:6000]
+
+
+def _json_answer(value: str) -> dict[str, Any]:
+    for parsed in _json_values(value):
+        if isinstance(parsed, dict):
+            nested = parsed.get("answer")
+            if isinstance(nested, dict):
+                return nested
+            return parsed
+    raise HTTPException(502, "模型没有返回可读取的论文自动补全结果。")
 
 
 def _paper_key(doi: str, title: str) -> str:
@@ -827,6 +863,22 @@ async def paper_context(
                 raise HTTPException(404, "OpenAlex 中没有找到这篇论文，请检查标题或 DOI。")
             work = results[0]
             work_id = str(work.get("id") or "")
+            paper_doi = str(work.get("doi") or "").replace("https://doi.org/", "")
+            paper_abstract = _openalex_abstract(work.get("abstract_inverted_index"))
+            paper_venue = str((((work.get("primary_location") or {}).get("source") or {}).get("display_name") or "")).strip()
+            paper_url = str(
+                work.get("doi")
+                or (work.get("primary_location") or {}).get("landing_page_url")
+                or work.get("id")
+                or ""
+            )
+            paper_pdf_url = str(
+                (work.get("best_oa_location") or {}).get("pdf_url")
+                or (work.get("primary_location") or {}).get("pdf_url")
+                or ""
+            )
+            metadata_sources = ["OpenAlex"]
+            pmid = str((work.get("ids") or {}).get("pmid") or "").rsplit("/", 1)[-1]
             corresponding_ids = {str(item) for item in work.get("corresponding_author_ids", [])}
             authors: list[dict[str, str]] = []
             for authorship in work.get("authorships", []):
@@ -866,6 +918,36 @@ async def paper_context(
                     })
                     if len(recent_works) >= 12:
                         break
+
+            if not paper_abstract and pmid:
+                try:
+                    pubmed_response = await client.get(
+                        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                        params={"db": "pubmed", "id": pmid, "retmode": "xml"},
+                        headers={"User-Agent": "IdeaMiner/0.1 scholarly-discovery"},
+                    )
+                    pubmed_response.raise_for_status()
+                    if len(pubmed_response.content) <= 2_000_000:
+                        paper_abstract = _pubmed_abstract(pubmed_response.text)
+                        if paper_abstract:
+                            metadata_sources.append("PubMed")
+                except (httpx.HTTPError, ValueError):
+                    pass
+
+            if not paper_abstract and paper_doi:
+                try:
+                    semantic_payload = await _academic_json(
+                        client,
+                        f"https://api.semanticscholar.org/graph/v1/paper/{quote(f'DOI:{paper_doi}', safe=':')}",
+                        {"fields": "title,abstract,venue,year,authors,url,openAccessPdf"},
+                    )
+                    paper_abstract = str(semantic_payload.get("abstract") or "").strip()[:6000]
+                    paper_venue = paper_venue or str(semantic_payload.get("venue") or "").strip()
+                    paper_pdf_url = paper_pdf_url or str((semantic_payload.get("openAccessPdf") or {}).get("url") or "")
+                    if paper_abstract:
+                        metadata_sources.append("Semantic Scholar")
+                except (httpx.HTTPError, ValueError):
+                    pass
     except HTTPException:
         raise
     except (httpx.HTTPError, ValueError) as error:
@@ -874,6 +956,18 @@ async def paper_context(
     return {
         "paper_id": work_id,
         "matched_title": str(work.get("title") or "").strip(),
+        "publication_year": int(work.get("publication_year") or 0),
+        "publication_date": str(work.get("publication_date") or ""),
+        "venue": paper_venue,
+        "abstract": paper_abstract,
+        "doi": paper_doi,
+        "url": paper_url,
+        "pdf_url": paper_pdf_url,
+        "authors": [
+            str((authorship.get("author") or {}).get("display_name") or authorship.get("raw_author_name") or "").strip()
+            for authorship in work.get("authorships", [])[:20]
+            if isinstance(authorship, dict)
+        ],
         "corresponding_authors": authors,
         "recent_works": recent_works,
         "evidence_note": (
@@ -881,8 +975,57 @@ async def paper_context(
             if authors else
             "OpenAlex 未明确标注通讯作者；不得把末位作者自动当成通讯作者。请到论文原文核验。"
         ),
-        "source": "OpenAlex",
+        "source": " + ".join(metadata_sources),
     }
+
+
+@app.post("/api/papers/enrich")
+async def enrich_paper(payload: PaperEnrichmentRequest) -> dict[str, str]:
+    config = _active_agent_config()
+    if not config["configured"]:
+        raise HTTPException(409, "请先配置 Agent 模型，才能自动翻译和识别论文类型。")
+    answer, _ = await _call_agent_provider(
+        config,
+        model=str(config["model"]),
+        reasoning_effort="none",
+        instructions="""你是论文元数据翻译与分类助手。只能翻译和归纳输入中已有的信息，不得补造实验结果、作者信息或论文结论。
+把英文题目、期刊名和摘要忠实翻译为简体中文，专业术语首次出现时保留英文括注。若摘要为空，abstract_zh 必须为空。
+仅根据 scholarly_context 中明确标注的通讯作者及其近年论文生成 author_direction_summary_zh。按时间和主题归纳稳定核心问题、常用对象/数据、关键方法、方向变化、本文位置和可能延伸；排除明显不相关论文。若没有明确通讯作者或证据不足，必须直接说明无法可靠总结，不得按末位作者或同名作者猜测。
+根据题目、期刊和摘要识别研究设计；无法确定时使用 auto。journal_profile 必须从 adaptive、nature_science、cell_mechanism、clinical、ai_engineering、foundation_model、theory_methods、engineering_systems、behavioral_observational、resource_review、general 中选择。
+answer 必须是严格 JSON 字符串，字段只能是 title_zh、venue_zh、abstract_zh、study_type、domain_zh、cross_domain_clues_zh、goal_zh、journal_profile、author_direction_summary_zh。不要输出 Markdown。proposals 必须为空数组。""",
+        input_text=json.dumps({
+            "title": payload.title,
+            "venue": payload.venue,
+            "abstract": payload.abstract,
+            "topic": payload.topic,
+            "scholarly_context": payload.scholarly_context,
+        }, ensure_ascii=False),
+    )
+    value = _json_answer(answer)
+    allowed_profiles = {
+        "adaptive", "nature_science", "cell_mechanism", "clinical", "ai_engineering",
+        "foundation_model", "theory_methods", "engineering_systems",
+        "behavioral_observational", "resource_review", "general",
+    }
+    result = {
+        "title_zh": str(value.get("title_zh") or "").strip()[:500],
+        "venue_zh": str(value.get("venue_zh") or "").strip()[:500],
+        "abstract_zh": str(value.get("abstract_zh") or "").strip()[:6000],
+        "study_type": str(value.get("study_type") or "auto").strip()[:100],
+        "domain_zh": str(value.get("domain_zh") or payload.topic or "").strip()[:500],
+        "cross_domain_clues_zh": str(value.get("cross_domain_clues_zh") or "").strip()[:2000],
+        "goal_zh": str(value.get("goal_zh") or "理解论文强逻辑、完成复现并形成新 Idea。").strip()[:1000],
+        "journal_profile": str(value.get("journal_profile") or "adaptive").strip(),
+        "author_direction_summary_zh": str(
+            value.get("author_direction_summary_zh")
+            or "当前元数据不足，无法可靠总结通讯作者的近年研究方向。"
+        ).strip()[:4000],
+    }
+    if result["journal_profile"] not in allowed_profiles:
+        result["journal_profile"] = "adaptive"
+    if not payload.abstract.strip():
+        result["abstract_zh"] = ""
+    return result
 
 
 @app.get("/api/library-state")

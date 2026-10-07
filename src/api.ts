@@ -1,4 +1,4 @@
-import type { AgentMode, AgentProvider, AgentRunResult, AgentRunSaveResult, AgentStatus, Attachment, Idea, PaperDiscoveryResult, PaperScholarlyContext, Project, ProjectGroup, ReasoningEffort, Relation, ReviewData, SemanticOpportunity, SemanticStatus, Status, Suggestion, TagInfo, TagMapData } from './types'
+import type { AgentMode, AgentProvider, AgentRunResult, AgentRunSaveResult, AgentStatus, Attachment, Idea, PaperAutoEnrichment, PaperDiscoveryResult, PaperScholarlyContext, Project, ProjectGroup, ReasoningEffort, Relation, ReviewData, SemanticOpportunity, SemanticStatus, Status, Suggestion, TagInfo, TagMapData } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -67,6 +67,7 @@ export const api = {
   agentStatus: () => request<AgentStatus>('/agent/status'),
   discoverPapers: (params: URLSearchParams) => request<PaperDiscoveryResult>(`/papers/discover?${params}`),
   paperContext: (params: URLSearchParams) => request<PaperScholarlyContext>(`/papers/context?${params}`),
+  enrichPaper: (data: { title: string; venue: string; abstract: string; topic: string; scholarly_context: string }) => request<PaperAutoEnrichment>('/papers/enrich', { method: 'POST', body: JSON.stringify(data) }),
   configureAgent: (data: { provider: AgentProvider; api_key: string; model: string; base_url: string; reasoning_effort: ReasoningEffort; remember_api_key: boolean }) => request<AgentStatus>('/agent/config', { method: 'POST', body: JSON.stringify(data) }),
   activateAgentProvider: (provider: AgentProvider) => request<AgentStatus>(`/agent/activate/${provider}`, { method: 'POST' }),
   forgetAgentProfile: (provider: AgentProvider) => request<AgentStatus>(`/agent/config/${provider}`, { method: 'DELETE' }),

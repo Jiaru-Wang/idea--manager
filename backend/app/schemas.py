@@ -94,6 +94,14 @@ class AgentRunRequest(BaseModel):
         return value.strip()
 
 
+class PaperEnrichmentRequest(BaseModel):
+    title: str = Field(min_length=2, max_length=500)
+    venue: str = Field(default="", max_length=500)
+    abstract: str = Field(default="", max_length=6000)
+    topic: str = Field(default="", max_length=500)
+    scholarly_context: str = Field(default="", max_length=12000)
+
+
 class DreamRunRequest(BaseModel):
     idea_ids: list[int] = Field(min_length=2, max_length=8)
     prompt: str = Field(default="", max_length=4000)

@@ -162,10 +162,30 @@ export interface PaperDiscoveryResult {
 export interface PaperScholarlyContext {
   paper_id: string
   matched_title: string
+  publication_year: number
+  publication_date: string
+  venue: string
+  abstract: string
+  doi: string
+  url: string
+  pdf_url: string
+  authors: string[]
   corresponding_authors: { id: string; name: string; orcid: string; institution: string }[]
   recent_works: { title: string; year: number; venue: string; doi: string; cited_by_count: number }[]
   evidence_note: string
   source: string
+}
+
+export interface PaperAutoEnrichment {
+  title_zh: string
+  venue_zh: string
+  abstract_zh: string
+  study_type: string
+  domain_zh: string
+  cross_domain_clues_zh: string
+  goal_zh: string
+  journal_profile: string
+  author_direction_summary_zh: string
 }
 
 export interface SemanticStatus {
