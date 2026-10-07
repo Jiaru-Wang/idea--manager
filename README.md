@@ -4,7 +4,50 @@ IdeaMiner is a local-first research idea manager built with React, TypeScript, F
 
 Your SQLite database is the canonical source of truth. The core application runs locally and does not require an account, cloud database, or API key.
 
-![IdeaMiner overview showing projects, filters, tags, stages, and research idea cards](docs/ideaminer-overview.png)
+## Research intelligence extensions
+
+This fork extends the local idea garden into an evidence-first paper reading and
+research-design workspace:
+
+- **Paper Radar:** searches recent scholarly metadata through OpenAlex and
+  Crossref, merges duplicate records, and sends selected papers directly into
+  the analysis workspace.
+- **Adaptive Paper Lab:** first identifies the paper's discipline, contribution
+  type, native reasoning topology, and venue-specific proof burden instead of
+  forcing every paper into one fixed template.
+- **Deep evidence reconstruction:** maps every major claim to correlation,
+  temporal ordering, necessity, sufficiency, interruption, reverse tests,
+  rescue or counterexamples, orthogonal measurements, and external validation
+  when those standards apply to the paper type.
+- **Competing-explanation audit:** tracks which experiment rules out reverse
+  causality, confounding, measurement artifacts, selection bias, leakage,
+  overfitting, or chance, and keeps unresolved alternatives visible.
+- **Top-journal and top-conference analysis:** connects each claim to decisive
+  evidence, public venue standards, and reader value, then removes key evidence
+  in a counterfactual downgrade test to identify the paper's minimum
+  indispensable evidence set.
+- **Two-pass adversarial review:** the optional second model pass attacks the
+  first analysis for causal leaps, circular reasoning, scale mismatch,
+  selective reporting, and reproduction gaps before rebuilding the report.
+- **Author trajectory grounding:** uses explicitly marked corresponding-author
+  metadata and recent works without guessing that the last author must be the
+  corresponding author.
+- **Cross-disciplinary idea bridge:** translates research bottlenecks into
+  variables, scales, constraints, observables, and falsifiable experiments
+  across biology, medicine, computing, mathematics, physics, engineering,
+  ecology, economics, game theory, and operations research.
+- **Paper-to-code reproduction map:** connects figures and tables to datasets,
+  preprocessing, tensor shapes, source files, functions, configurations,
+  commands, expected outputs, acceptance checks, and common failure modes.
+- **MiniMax and multi-provider Agent:** supports the MiniMax China API alongside
+  OpenAI, Anthropic, DeepSeek, Qwen, and local OpenAI-compatible models while
+  keeping credentials out of Git, SQLite, browser storage, and exports.
+
+Open **Paper Lab** from the top navigation to use these workflows. The image
+below shows the core local knowledge-garden interface that remains available
+behind the research workspace.
+
+![IdeaMiner core knowledge garden showing projects, filters, tags, stages, and research idea cards](docs/ideaminer-overview.png)
 
 _A privacy-safe example library. Your own ideas remain in the SQLite database beside your local installation._
 
@@ -28,7 +71,10 @@ For example: capture “Could prediction change with temporal scale?”, grow se
 - Local-file references that store paths and metadata without embedding file contents
 - JSON import/export and Markdown export
 - Weekly review, local semantic discovery, and cross-project Dream synthesis
-- Optional Agent workspace with separate OpenAI, Anthropic, DeepSeek, Qwen, and local profiles
+- Paper Radar with OpenAlex/Crossref discovery and corresponding-author grounding
+- Adaptive Paper Lab with evidence chains, competing explanations, venue-fit analysis, reproduction plans, and new research ideas
+- Single-pass deep reading or two-pass adversarial review for stronger causal and methodological scrutiny
+- Optional Agent workspace with separate MiniMax, OpenAI, Anthropic, DeepSeek, Qwen, and local profiles
 - Optional MCP bridge for using the same library from Codex
 
 ## Quick start on Windows
@@ -78,6 +124,21 @@ python launcher.py
 ```
 
 The coordinated launcher starts FastAPI on port 8000 and Vite on port 5173, opens the browser, and shuts both services down together.
+
+## Update and reopen an existing installation
+
+From the repository folder, pull the latest code and start the coordinated
+launcher:
+
+```bash
+git pull origin main
+.venv/bin/python launcher.py
+```
+
+Keep that terminal window open while using IdeaMiner. The latest local site is
+normally available at [http://127.0.0.1:5173](http://127.0.0.1:5173). A GitHub
+repository page only displays the code and README; it does not run the local
+application.
 
 ## First launch and storage
 
