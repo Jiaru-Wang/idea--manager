@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { BookOpenText, Check, Code2, ExternalLink, FileSearch, FileText, FlaskConical, GitFork, Globe2, Lightbulb, LoaderCircle, Network, Save, Search, ShieldAlert, Sparkles, UserRoundSearch, X } from 'lucide-react'
+import { BookOpenText, Check, Code2, Download, ExternalLink, FileSearch, FileText, FlaskConical, GitFork, Globe2, Lightbulb, LoaderCircle, Network, Pencil, Save, Search, ShieldAlert, Sparkles, Square, UserRoundSearch, X } from 'lucide-react'
 import { api } from '../api'
 import { IdeaMarkdown } from './IdeaMarkdown'
 import './PaperWorkspace.css'
@@ -7,6 +7,7 @@ import type { AgentMode, AgentProposal, AgentRunResult, AgentStatus, Attachment,
 
 type Scope = { type: 'all' } | { type: 'project'; id: number } | { type: 'group'; id: number }
 type PaperModule = 'full' | 'title_author' | 'introduction' | 'causal' | 'cross_domain' | 'reproduce' | 'ideas'
+type AnalysisStage = 'grounding' | 'analysis' | 'section' | 'synthesis' | 'diagram' | 'audit' | 'repair'
 
 type PaperDraft = {
   title: string
@@ -34,8 +35,28 @@ type DiscoveryPreferences = {
   autoRefresh: boolean
 }
 
+type PaperStageResult = { heading: string; answer: string; result: AgentRunResult }
+type PaperCheckpoint = {
+  version: 7
+  identity: string
+  updatedAt: string
+  sections: Record<string, PaperStageResult>
+  integrated?: AgentRunResult
+}
+
+type DiagramNodeKind = 'premise' | 'mechanism' | 'evidence' | 'outcome' | 'boundary'
+type DiagramEdgeKind = 'promotes' | 'inhibits' | 'supports' | 'refutes' | 'constrains' | 'associates'
+type DiagramNode = { id: string; label: string; detail: string; kind: DiagramNodeKind }
+type DiagramEdge = { source: string; target: string; kind: DiagramEdgeKind; label: string; evidence: string }
+type PaperDiagramSpec = { title: string; subtitle: string; conclusion: string; nodes: DiagramNode[]; edges: DiagramEdge[] }
+type PaperDiagramArtifact = { version: 1; identity: string; generatedAt: string; spec: PaperDiagramSpec; svg: string }
+
 const DRAFT_KEY = 'ideaminer-paper-lab-draft-v1'
 const DISCOVERY_KEY = 'ideaminer-paper-discovery-v1'
+const CHECKPOINT_KEY = 'ideaminer-paper-analysis-checkpoint-v7'
+const DIAGRAM_KEY = 'ideaminer-paper-inkscape-diagram-v1'
+const PAPER_DIAGRAM_TOKEN_PATTERN = /\n*\[\[paper-diagram:([A-Za-z0-9+/=]+)\]\]\s*$/
+const LEGACY_CHECKPOINT_KEYS = ['ideaminer-paper-analysis-checkpoint-v1', 'ideaminer-paper-analysis-checkpoint-v2', 'ideaminer-paper-analysis-checkpoint-v3', 'ideaminer-paper-analysis-checkpoint-v4', 'ideaminer-paper-analysis-checkpoint-v5', 'ideaminer-paper-analysis-checkpoint-v6']
 
 const defaultDraft: PaperDraft = {
   title: '',
@@ -53,7 +74,7 @@ const defaultDraft: PaperDraft = {
   sourceTextZh: '',
   goal: '理解论文的因果逻辑，找到可以复现的实验，并形成适合我当前研究的新 idea。',
   module: 'full',
-  analysisDepth: 'adversarial',
+  analysisDepth: 'deep',
 }
 
 const defaultDiscovery: DiscoveryPreferences = {
@@ -66,6 +87,14 @@ const defaultDiscovery: DiscoveryPreferences = {
 const modules: { id: PaperModule; label: string; detail: string }[] = [
   { id: 'full', label: '论文深度全链路', detail: '题目与作者 + 综述逻辑 + 因果实验链 + 交叉知识桥 + 新 Idea' },
   { id: 'reproduce', label: '代码复现', detail: 'Figure/Table 到数据、文件、命令和验收指标' },
+]
+
+const fullAnalysisSections: { module: Exclude<PaperModule, 'full' | 'reproduce'>; heading: string; label: string }[] = [
+  { module: 'title_author', heading: '论文定位与作者背景', label: '确认论文身份与作者积累' },
+  { module: 'introduction', heading: '摘要与引言逐句逐段逻辑', label: '重建作者为什么写下每句话' },
+  { module: 'causal', heading: '方法、结果与讨论证据链', label: '连接实验选择与结论' },
+  { module: 'cross_domain', heading: '突出难点与跨领域知识桥', label: '寻找真正可迁移的外部知识' },
+  { module: 'ideas', heading: '全文判断与新 Idea', label: '收束贡献、边界与延伸' },
 ]
 
 const journalProfiles: Record<string, { label: string; logic: string }> = {
@@ -167,12 +196,93 @@ function loadDiscoveryPreferences(): DiscoveryPreferences {
       ...defaultDiscovery,
       query: saved.query || defaultDiscovery.query,
       venues: '',
-      fromYear: new Date().getFullYear() - 3,
+      fromYear: typeof saved.fromYear === 'number' && saved.fromYear >= 1900 ? saved.fromYear : defaultDiscovery.fromYear,
       autoRefresh: true,
     }
   } catch {
     return defaultDiscovery
   }
+}
+
+function checkpointIdentity(draft: PaperDraft) {
+  return [draft.title.trim().toLowerCase(), draft.locator.trim().toLowerCase(), draft.module, draft.analysisDepth, draft.sourceText.length].join('|')
+}
+
+function loadPaperCheckpoint(draft: PaperDraft): PaperCheckpoint | null {
+  try {
+    const checkpoint = JSON.parse(window.localStorage.getItem(CHECKPOINT_KEY) || 'null') as PaperCheckpoint | null
+    if (!checkpoint || checkpoint.version !== 7 || checkpoint.identity !== checkpointIdentity(draft) || !checkpoint.sections) return null
+    return checkpoint
+  } catch {
+    return null
+  }
+}
+
+function savePaperCheckpoint(draft: PaperDraft, sections: PaperStageResult[], integrated?: AgentRunResult) {
+  const checkpoint: PaperCheckpoint = {
+    version: 7,
+    identity: checkpointIdentity(draft),
+    updatedAt: new Date().toISOString(),
+    sections: Object.fromEntries(sections.map(section => [section.heading, section])),
+    integrated,
+  }
+  window.localStorage.setItem(CHECKPOINT_KEY, JSON.stringify(checkpoint))
+}
+
+function clearPaperCheckpoint(draft: PaperDraft) {
+  if (loadPaperCheckpoint(draft)) window.localStorage.removeItem(CHECKPOINT_KEY)
+}
+
+function loadPaperDiagram(draft: PaperDraft): PaperDiagramArtifact | null {
+  try {
+    const artifact = JSON.parse(window.localStorage.getItem(DIAGRAM_KEY) || 'null') as PaperDiagramArtifact | null
+    if (artifact?.version !== 1 || artifact.identity !== checkpointIdentity(draft) || !artifact.spec) return null
+    return { ...artifact, svg: renderInkscapeSvg(artifact.spec) }
+  } catch {
+    return null
+  }
+}
+
+function savePaperDiagram(draft: PaperDraft, artifact: PaperDiagramArtifact) {
+  window.localStorage.setItem(DIAGRAM_KEY, JSON.stringify({ ...artifact, identity: checkpointIdentity(draft) }))
+}
+
+function encodePaperDiagram(svg: string) {
+  const bytes = new TextEncoder().encode(svg)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  return window.btoa(binary)
+}
+
+function reportContentWithDiagram(markdown: string, artifact: PaperDiagramArtifact | null) {
+  const report = markdown.replace(PAPER_DIAGRAM_TOKEN_PATTERN, '').trimEnd()
+  return artifact?.svg ? `${report}\n\n[[paper-diagram:${encodePaperDiagram(artifact.svg)}]]` : report
+}
+
+function isProviderTimeout(reason: unknown) {
+  return reason instanceof Error && /(?:响应超时|timeout|timed out)/i.test(reason.message)
+}
+
+function hasSubstantivePaperAnswer(answer: string) {
+  const substantive = answer.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, '').replace(/[\s.…·_-]/g, '')
+  return substantive.length >= 80
+}
+
+function validPaperSections(checkpoint: PaperCheckpoint | null) {
+  if (!checkpoint) return []
+  return fullAnalysisSections
+    .map(section => checkpoint.sections[section.heading])
+    .filter((section): section is PaperStageResult => Boolean(section && hasSubstantivePaperAnswer(section.answer)))
+}
+
+function partialStageReport(draft: PaperDraft, sections: PaperStageResult[]) {
+  const body = sections.map((section, index) => `## 阶段 ${index + 1}：${section.heading}\n\n${withoutLeadingTitle(section.answer)}`).join('\n\n')
+  const nextAction = sections.length >= fullAnalysisSections.length
+    ? '五个阶段均已生成并保存；现在可以直接绘制科研逻辑图。'
+    : '点击“继续生成下一阶段”后会在此基础上追加，不会重新开始。'
+  return `# ${draft.title.trim()}：分阶段阅读记录\n\n> 当前已完成 ${sections.length}/${fullAnalysisSections.length} 个阅读阶段。以下是已经生成并保存的内容；${nextAction}\n\n${body}`
 }
 
 function moduleIcon(id: PaperModule) {
@@ -210,8 +320,22 @@ function paperHref(locator: string) {
 }
 
 function normalizePaperReport(markdown: string) {
+  let unwrapped = markdown.trim()
+  for (let depth = 0; depth < 3; depth += 1) {
+    const fenced = unwrapped.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+    const candidate = (fenced?.[1] || unwrapped).trim()
+    if (!candidate.startsWith('{')) break
+    try {
+      const parsed = JSON.parse(candidate) as { answer?: unknown }
+      if (!parsed || typeof parsed !== 'object' || typeof parsed.answer !== 'string') break
+      unwrapped = parsed.answer.trim()
+    } catch {
+      break
+    }
+  }
+  const visible = unwrapped.replace(/<think\b[^>]*>[\s\S]*?<\/think>\s*/gi, '').replace(/<think\b[^>]*>[\s\S]*$/gi, '').trim()
   let fenced = false
-  return markdown.split('\n').flatMap(line => {
+  return visible.split('\n').flatMap(line => {
     if (line.trimStart().startsWith('```')) {
       fenced = !fenced
       return [line]
@@ -223,6 +347,307 @@ function normalizePaperReport(markdown: string) {
     if (!cells.length || cells.every(cell => /^:?-{3,}:?$/.test(cell))) return []
     return ['', `**${cells[0]}**`, ...cells.slice(1).map(cell => `- ${cell}`), '']
   }).join('\n').replace(/\n{3,}/g, '\n\n')
+}
+
+const diagramNodeKinds = new Set<DiagramNodeKind>(['premise', 'mechanism', 'evidence', 'outcome', 'boundary'])
+const diagramEdgeKinds = new Set<DiagramEdgeKind>(['promotes', 'inhibits', 'supports', 'refutes', 'constrains', 'associates'])
+
+function normalizeDiagramTypography(value: string) {
+  return value
+    .replace(/\b([dDlL])\s*-\s*(\d+)\s*H\s*G\b/g, '$1-$2HG')
+    .replace(/IFN\s*[-–]\s*γ/gi, 'IFN-γ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function cleanDiagramText(value: unknown, fallback: string, maxLength: number) {
+  const text = typeof value === 'string'
+    ? normalizeDiagramTypography(value)
+    : ''
+  return (text || fallback).slice(0, maxLength)
+}
+
+function parsePaperDiagramSpec(answer: string, draft: PaperDraft): PaperDiagramSpec {
+  const normalized = normalizePaperReport(answer)
+  const fenced = normalized.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1]
+  const source = (fenced || normalized).trim()
+  const start = source.indexOf('{')
+  const end = source.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error('绘图模型没有返回可识别的图形数据，请重新绘制。')
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(source.slice(start, end + 1)) as Record<string, unknown>
+  } catch {
+    throw new Error('绘图模型返回的数据格式不完整，请重新绘制。')
+  }
+
+  const rawNodes = Array.isArray(parsed.nodes) ? parsed.nodes : []
+  const nodes: DiagramNode[] = []
+  const ids = new Set<string>()
+  rawNodes.slice(0, 10).forEach((raw, index) => {
+    if (!raw || typeof raw !== 'object') return
+    const item = raw as Record<string, unknown>
+    let id = cleanDiagramText(item.id, `N${index + 1}`, 24).replace(/[^a-zA-Z0-9_-]/g, '') || `N${index + 1}`
+    while (ids.has(id)) id = `${id}-${index + 1}`
+    ids.add(id)
+    const kind = diagramNodeKinds.has(item.kind as DiagramNodeKind) ? item.kind as DiagramNodeKind : 'mechanism'
+    nodes.push({
+      id,
+      label: cleanDiagramText(item.label, `逻辑节点 ${index + 1}`, 120),
+      detail: cleanDiagramText(item.detail, '来自五阶段分析的关键节点', 1200),
+      kind,
+    })
+  })
+  if (nodes.length < 3) throw new Error('科研逻辑图至少需要三个有效节点，请重新绘制。')
+
+  const nodeIds = new Set(nodes.map(node => node.id))
+  const rawEdges = Array.isArray(parsed.edges) ? parsed.edges : []
+  const edges: DiagramEdge[] = rawEdges.slice(0, 16).flatMap(raw => {
+    if (!raw || typeof raw !== 'object') return []
+    const item = raw as Record<string, unknown>
+    const sourceId = cleanDiagramText(item.source, '', 24).replace(/[^a-zA-Z0-9_-]/g, '')
+    const targetId = cleanDiagramText(item.target, '', 24).replace(/[^a-zA-Z0-9_-]/g, '')
+    if (!nodeIds.has(sourceId) || !nodeIds.has(targetId) || sourceId === targetId) return []
+    const kind = diagramEdgeKinds.has(item.kind as DiagramEdgeKind) ? item.kind as DiagramEdgeKind : 'associates'
+    return [{
+      source: sourceId,
+      target: targetId,
+      kind,
+      label: cleanDiagramText(item.label, kind === 'inhibits' ? '抑制' : '推动', 240),
+      evidence: cleanDiagramText(item.evidence, '证据详情待原文核验', 1600),
+    }]
+  })
+  if (edges.length < 2) throw new Error('科研逻辑图缺少有效关系，请重新绘制。')
+
+  return {
+    title: cleanDiagramText(parsed.title, draft.titleZh || draft.title, 240),
+    subtitle: cleanDiagramText(parsed.subtitle, '论文科研逻辑图', 360),
+    conclusion: cleanDiagramText(parsed.conclusion, '图中只保留支撑核心结论的最短充分路径。', 800),
+    nodes,
+    edges,
+  }
+}
+
+function buildDiagramPrompt(draft: PaperDraft, sections: PaperStageResult[]) {
+  const evidence = sections.map((section, index) => `阶段 ${index + 1}：${section.heading}\n${section.answer}`).join('\n\n')
+  return `你是科研图形编辑与方法学专家。请只根据下面已经完成的五阶段论文分析，提炼一张论文专属科研逻辑图的数据。不要重写、压缩或总结五阶段报告，也不要输出任何报告文字；本次唯一产物是供 Inkscape SVG 绘制使用的结构化图数据。
+
+论文英文题目：${draft.title}
+论文中文题目：${draft.titleZh || '待核验'}
+论文类型：${draft.studyType || '待判断'}
+
+绘图原则：
+- 先识别这篇论文自己的逻辑拓扑。机制论文可画变量因果与救援；算法论文画问题约束、设计模块、消融和泛化；理论论文画假设、命题、证明和反例；观察研究画现象、识别策略、混杂排除和稳健性。禁止把示例中的 D-2HG、LDH 或任何固定链条套到别的论文。
+- 图必须一眼说明“作者为什么开始 -> 关键转折/机制或设计 -> 核心证据如何排除替代解释 -> 最终结论与边界”。只保留支撑一个核心结论的最短充分路径，同时保留论文真实存在的分支、汇合、抑制、反证或回路。
+- 使用 4–9 个节点、3–14 条边。节点名称不超过 12 个汉字，详情解释该节点来自哪项观察、实验、定理或结果。没有证据的关系不得画成因果，使用 associates 或 boundary 节点标明边界。
+- 每条边的 label 必须完整说明“怎样影响、凭什么连接”，不得为了排版删词或截断；SVG 会自动将关系说明折成多行。
+- 节点 kind 只能是 premise、mechanism、evidence、outcome、boundary。
+- 边 kind 只能是 promotes、inhibits、supports、refutes、constrains、associates。
+- title 与 subtitle 使用中文；label 简短；evidence 写清该连线的证据依据或“待原文核验”。
+
+只返回一个严格 JSON 对象，不要 Markdown、代码围栏、解释文字或 proposals。结构必须完全如下：
+{"title":"图标题","subtitle":"一句话说明图的中心问题","conclusion":"读图后必须记住的核心结论","nodes":[{"id":"N1","label":"节点名称","detail":"证据或含义","kind":"premise"}],"edges":[{"source":"N1","target":"N2","kind":"promotes","label":"关系短语","evidence":"这条关系的证据"}]}
+
+五阶段分析原文：
+${evidence}`
+}
+
+function escapeSvg(value: string) {
+  return value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[character] || character))
+}
+
+function wrapDiagramLabel(label: string, maxUnits = 10) {
+  const words = label.match(/[A-Za-z0-9+./-]+|[\u3400-\u9fff]|[^\s]/g) || [label]
+  const lines: string[] = []
+  let current = ''
+  let currentUnits = 0
+  const displayUnits = (value: string) => /^[\x00-\xff]+$/.test(value) ? Math.max(1, value.length * 0.55) : value.length
+  words.forEach(word => {
+    const separator = current && /^[A-Za-z0-9]/.test(current.slice(-1)) && /^[A-Za-z0-9]/.test(word) ? ' ' : ''
+    const nextUnits = currentUnits + (separator ? 0.4 : 0) + displayUnits(word)
+    if (nextUnits > maxUnits && current) {
+      lines.push(current)
+      current = word
+      currentUnits = displayUnits(word)
+    } else {
+      current += separator + word
+      currentUnits = nextUnits
+    }
+  })
+  if (current) lines.push(current)
+  return lines
+}
+
+function renderInkscapeSvg(spec: PaperDiagramSpec) {
+  const width = 1600
+  const height = 980
+  const nodeHeight = 126
+  const top = 260
+  const bottom = 760
+  const incoming = new Map(spec.nodes.map(node => [node.id, 0]))
+  const outgoing = new Map(spec.nodes.map(node => [node.id, [] as string[]]))
+  spec.edges.forEach(edge => {
+    incoming.set(edge.target, (incoming.get(edge.target) || 0) + 1)
+    outgoing.get(edge.source)?.push(edge.target)
+  })
+  const layers = new Map<string, number>()
+  const queue = spec.nodes.filter(node => (incoming.get(node.id) || 0) === 0).map(node => node.id)
+  if (!queue.length) queue.push(spec.nodes[0].id)
+  queue.forEach(id => layers.set(id, 0))
+  const pending = new Map(incoming)
+  while (queue.length) {
+    const id = queue.shift()!
+    const layer = layers.get(id) || 0
+    outgoing.get(id)?.forEach(target => {
+      layers.set(target, Math.max(layers.get(target) || 0, layer + 1))
+      pending.set(target, (pending.get(target) || 0) - 1)
+      if ((pending.get(target) || 0) <= 0) queue.push(target)
+    })
+  }
+  spec.nodes.forEach((node, index) => {
+    if (!layers.has(node.id)) layers.set(node.id, Math.min(index, 4))
+  })
+  const byLayer = new Map<number, DiagramNode[]>()
+  spec.nodes.forEach(node => {
+    const layer = Math.min(layers.get(node.id) || 0, 6)
+    byLayer.set(layer, [...(byLayer.get(layer) || []), node])
+  })
+  const occupiedLayers = [...byLayer.keys()].sort((a, b) => a - b)
+  const layerIndex = new Map(occupiedLayers.map((layer, index) => [layer, index]))
+  const layerCount = Math.max(1, occupiedLayers.length)
+  const horizontalGap = layerCount >= 6 ? 26 : 46
+  const nodeWidth = Math.max(178, Math.min(230, (1448 - horizontalGap * (layerCount - 1)) / layerCount))
+  const usableWidth = 1448 - nodeWidth
+  const positions = new Map<string, { x: number; y: number }>()
+  byLayer.forEach((nodes, layer) => {
+    const normalizedLayer = layerIndex.get(layer) || 0
+    const x = 76 + (layerCount === 1 ? usableWidth / 2 : (normalizedLayer / (layerCount - 1)) * usableWidth)
+    const available = bottom - top
+    nodes.forEach((node, index) => {
+      const y = nodes.length === 1
+        ? top + available / 2 - nodeHeight / 2
+        : top + (index * available) / (nodes.length - 1) - nodeHeight / 2
+      positions.set(node.id, { x, y })
+    })
+  })
+
+  const nodePalette: Record<DiagramNodeKind, { fill: string; stroke: string; accent: string }> = {
+    premise: { fill: '#f3f0e8', stroke: '#81745d', accent: '#b79d66' },
+    mechanism: { fill: '#eef5f1', stroke: '#356f62', accent: '#3f8a78' },
+    evidence: { fill: '#edf3f7', stroke: '#3d6c82', accent: '#5d91a8' },
+    outcome: { fill: '#fff1e9', stroke: '#a6533f', accent: '#d46b4f' },
+    boundary: { fill: '#f3f2f2', stroke: '#747474', accent: '#9a9a9a' },
+  }
+  const edgePalette: Record<DiagramEdgeKind, { stroke: string; marker: string; dash: string }> = {
+    promotes: { stroke: '#c9573d', marker: 'arrow-warm', dash: '' },
+    inhibits: { stroke: '#b1443d', marker: 'inhibit', dash: '' },
+    supports: { stroke: '#2f786e', marker: 'arrow-teal', dash: '' },
+    refutes: { stroke: '#a34f5c', marker: 'arrow-warm', dash: '9 7' },
+    constrains: { stroke: '#6b7470', marker: 'arrow-gray', dash: '6 6' },
+    associates: { stroke: '#6e858e', marker: 'arrow-gray', dash: '4 7' },
+  }
+  const routeUse = new Map<string, number>()
+  const placedLabelRects: { x: number; y: number; width: number; height: number }[] = []
+  const overlaps = (a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }) => (
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+  )
+  const edgeGraphics = spec.edges.map((edge, index) => {
+    const source = positions.get(edge.source)
+    const target = positions.get(edge.target)
+    if (!source || !target) return { path: '', label: '' }
+    const sx = source.x + nodeWidth
+    const sy = source.y + nodeHeight / 2
+    const tx = target.x
+    const ty = target.y + nodeHeight / 2
+    const routeKey = `${Math.round(source.x)}-${Math.round(target.x)}`
+    const routeIndex = routeUse.get(routeKey) || 0
+    routeUse.set(routeKey, routeIndex + 1)
+    const direction = ty >= sy ? 1 : -1
+    const routeOffset = routeIndex * 34 * direction
+    const midX = tx > sx + 10 ? (sx + tx) / 2 : Math.min(width - 58, Math.max(sx, tx) + 58 + routeIndex * 18)
+    const midY = (sy + ty) / 2 + routeOffset
+    const path = `M ${sx} ${sy} C ${midX} ${sy}, ${midX} ${ty}, ${tx} ${ty}`
+    const style = edgePalette[edge.kind]
+    const edgeLabel = normalizeDiagramTypography(edge.label)
+    const labelLines = wrapDiagramLabel(edgeLabel, 10.5)
+    const labelFontSize = labelLines.length >= 5 ? 12 : labelLines.length >= 3 ? 14 : 16
+    const labelLineHeight = labelFontSize + 6
+    const labelWidth = Math.max(88, Math.min(210, 32 + Math.max(...labelLines.map(line => line.length)) * (labelFontSize + 2)))
+    const labelHeight = 16 + labelLines.length * labelLineHeight
+    const labelX = midX
+    const clampLabelY = (center: number) => Math.max(205 + labelHeight / 2, Math.min(812 - labelHeight / 2, center))
+    const candidateCenters = [
+      Math.min(sy, ty) - nodeHeight / 2 - labelHeight / 2 - 16 - routeIndex * 8,
+      Math.max(sy, ty) + nodeHeight / 2 + labelHeight / 2 + 16 + routeIndex * 8,
+      midY - labelHeight / 2 - 14,
+      midY + labelHeight / 2 + 14,
+    ].map(clampLabelY)
+    const labelCenterY = candidateCenters
+      .map(center => {
+        const rect = { x: labelX - labelWidth / 2, y: center - labelHeight / 2, width: labelWidth, height: labelHeight }
+        const nodeCollisions = [...positions.values()].filter(position => overlaps(rect, {
+          x: position.x - 8,
+          y: position.y - 8,
+          width: nodeWidth + 16,
+          height: nodeHeight + 16,
+        })).length
+        const labelCollisions = placedLabelRects.filter(placed => overlaps(rect, placed)).length
+        return { center, rect, score: nodeCollisions * 1000 + labelCollisions * 500 + Math.abs(center - midY) }
+      })
+      .sort((a, b) => a.score - b.score)[0]
+    placedLabelRects.push(labelCenterY.rect)
+    const labelY = labelCenterY.rect.y
+    const labelText = labelLines.map((line, lineIndex) => `<tspan x="${labelX}" dy="${lineIndex ? labelLineHeight : 0}">${escapeSvg(line)}</tspan>`).join('')
+    return {
+      path: `<g id="edge-${index + 1}" inkscape:label="${escapeSvg(edgeLabel)}"><title>${escapeSvg(edge.evidence)}</title><path d="${path}" fill="none" stroke="${style.stroke}" stroke-width="3.5" stroke-linecap="round"${style.dash ? ` stroke-dasharray="${style.dash}"` : ''} marker-end="url(#${style.marker})"/></g>`,
+      label: `<g id="edge-label-${index + 1}" inkscape:label="关系说明：${escapeSvg(edgeLabel)}"><rect x="${labelX - labelWidth / 2}" y="${labelY}" width="${labelWidth}" height="${labelHeight}" rx="6" fill="#fffdf9" fill-opacity="0.96" stroke="#d7ddd6"/><text x="${labelX}" y="${labelY + labelFontSize + 6}" text-anchor="middle" class="edge-label" style="font-size:${labelFontSize}px" fill="${style.stroke}">${labelText}</text></g>`,
+    }
+  })
+  const edgePathSvg = edgeGraphics.map(graphic => graphic.path).join('')
+  const edgeLabelSvg = edgeGraphics.map(graphic => graphic.label).join('')
+  const nodeSvg = spec.nodes.map((node, index) => {
+    const position = positions.get(node.id)!
+    const palette = nodePalette[node.kind]
+    const nodeLabel = normalizeDiagramTypography(node.label)
+    const lines = wrapDiagramLabel(nodeLabel, nodeWidth < 190 ? 8.5 : 10.5)
+    const nodeFontSize = lines.length >= 4 ? 13 : lines.length === 3 ? 15 : 18
+    const nodeLineHeight = nodeFontSize + 5
+    const textY = position.y + nodeHeight / 2 - ((lines.length - 1) * nodeLineHeight) / 2 + nodeFontSize * 0.35
+    const text = lines.map((line, lineIndex) => `<tspan x="${position.x + nodeWidth / 2}" dy="${lineIndex ? nodeLineHeight : 0}">${escapeSvg(line)}</tspan>`).join('')
+    return `<g id="node-${escapeSvg(node.id)}" inkscape:label="${escapeSvg(nodeLabel)}"><title>${escapeSvg(node.detail)}</title><rect x="${position.x}" y="${position.y}" width="${nodeWidth}" height="${nodeHeight}" rx="14" fill="${palette.fill}" stroke="${palette.stroke}" stroke-width="3"/><rect x="${position.x}" y="${position.y}" width="8" height="${nodeHeight}" rx="4" fill="${palette.accent}"/><circle cx="${position.x + 24}" cy="${position.y + 22}" r="13" fill="${palette.accent}"/><text x="${position.x + 24}" y="${position.y + 27}" text-anchor="middle" class="node-index">${index + 1}</text><text x="${position.x + nodeWidth / 2}" y="${textY}" text-anchor="middle" class="node-label" style="font-size:${nodeFontSize}px">${text}</text></g>`
+  }).join('')
+
+  const titleLines = wrapDiagramLabel(normalizeDiagramTypography(spec.title), 38)
+  const titleSvg = titleLines.map((line, index) => `<tspan x="76" dy="${index ? 38 : 0}">${escapeSvg(line)}</tspan>`).join('')
+  const subtitleY = 92 + (titleLines.length - 1) * 38 + 34
+  const subtitleLines = wrapDiagramLabel(normalizeDiagramTypography(spec.subtitle), 70)
+  const subtitleSvg = subtitleLines.map((line, index) => `<tspan x="76" dy="${index ? 22 : 0}">${escapeSvg(line)}</tspan>`).join('')
+  const dividerY = subtitleY + (subtitleLines.length - 1) * 22 + 22
+  const conclusionLines = wrapDiagramLabel(normalizeDiagramTypography(spec.conclusion), 52)
+  const conclusionText = conclusionLines.map((line, index) => `<tspan x="700" dy="${index ? 24 : 0}">${escapeSvg(line)}</tspan>`).join('')
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" version="1.1" inkscape:version="1.4" id="paper-logic-diagram">
+  <sodipodi:namedview id="namedview1" pagecolor="#f4f1e9" bordercolor="#40534a" inkscape:document-units="px" showgrid="false"/>
+  <defs>
+    <marker id="arrow-warm" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 0 0 L 10 5 L 0 10 z" fill="#c9573d"/></marker>
+    <marker id="arrow-teal" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2f786e"/></marker>
+    <marker id="arrow-gray" markerWidth="12" markerHeight="12" refX="10" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M 0 0 L 10 5 L 0 10 z" fill="#6e858e"/></marker>
+    <marker id="inhibit" markerWidth="10" markerHeight="18" refX="2" refY="9" orient="auto" markerUnits="strokeWidth"><path d="M 2 1 L 2 17" fill="none" stroke="#b1443d" stroke-width="3"/></marker>
+    <style>.title{font:700 32px Arial,'PingFang SC',sans-serif}.subtitle{font:17px Arial,'PingFang SC',sans-serif}.node-label{font:700 19px Arial,'PingFang SC',sans-serif;fill:#263b32}.node-index{font:700 13px Arial,sans-serif;fill:white}.edge-label{font:700 13px Arial,'PingFang SC',sans-serif}.conclusion{font:600 17px Arial,'PingFang SC',sans-serif;fill:#354b42}</style>
+  </defs>
+  <g inkscape:groupmode="layer" inkscape:label="背景" id="background"><rect width="${width}" height="${height}" fill="#f4f1e9"/><rect x="42" y="42" width="1516" height="896" rx="18" fill="#fffdf9" stroke="#d7ddd6" stroke-width="2"/></g>
+  <g inkscape:groupmode="layer" inkscape:label="标题" id="headings"><text x="76" y="92" class="title" fill="#263b32">${titleSvg}</text><text x="76" y="${subtitleY}" class="subtitle" fill="#63736b">${subtitleSvg}</text><line x1="76" y1="${dividerY}" x2="1524" y2="${dividerY}" stroke="#d9dfd9" stroke-width="2"/></g>
+  <g inkscape:groupmode="layer" inkscape:label="逻辑关系" id="edges">${edgePathSvg}</g>
+  <g inkscape:groupmode="layer" inkscape:label="逻辑节点" id="nodes">${nodeSvg}</g>
+  <g inkscape:groupmode="layer" inkscape:label="关系文字" id="edge-labels">${edgeLabelSvg}</g>
+  <g inkscape:groupmode="layer" inkscape:label="核心结论" id="conclusion"><rect x="76" y="838" width="1448" height="78" rx="8" fill="#e9f1ed"/><text x="800" y="868" text-anchor="middle" class="conclusion">${conclusionText}</text></g>
+</svg>`
+}
+
+function diagramFilename(title: string) {
+  const safe = title.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 70) || 'paper-logic'
+  return `${safe}-inkscape.svg`
 }
 
 function missingPaperSections(markdown: string, module: PaperModule) {
@@ -243,29 +668,48 @@ function missingPaperSections(markdown: string, module: PaperModule) {
     return missing
   }
 
-  requireMatch('论文结构与科研逻辑总图', /论文结构与科研逻辑总图/)
-  requireMatch('正向证明路线', /正向(?:证明)?(?:路线|逻辑|图)/)
-  requireMatch('反向必要证据图', /反向(?:必要)?(?:证据|路线|逻辑|图)/)
-  requireMatch('逻辑断点', /逻辑断点/)
-  requireMatch('题目与作者', /题目与作者/)
-  requireMatch('通讯作者研究方向总结', /通讯作者研究方向总结/)
-  requireMatch('综述逻辑', /综述逻辑/)
-  requireMatch('因果实验链', /因果实验链/)
-  requireMatch('交叉知识桥', /交叉知识桥/)
-  requireMatch('新 Idea 与顶刊理由', /新\s*Idea\s*与顶刊理由/i)
-  requireMatch('摘要微逻辑', /摘要[^\n]{0,20}(?:微逻辑|拆解|逻辑)/)
-  requireMatch('Introduction/综述微逻辑', /(?:Introduction|引言|综述)[^\n]{0,30}(?:微逻辑|拆解|逻辑)/i)
-  requireMatch('方法/实验微逻辑', /(?:方法|实验)[^\n]{0,30}(?:微逻辑|拆解|逻辑|证据)/)
-  requireMatch('结果微逻辑', /结果[^\n]{0,30}(?:微逻辑|拆解|逻辑|证据)/)
-  requireMatch('讨论/结论微逻辑', /(?:讨论|结论)[^\n]{0,30}(?:微逻辑|拆解|逻辑|边界)/)
-  if ((text.match(/本模块小结/g) || []).length < 5) missing.push('五个“本模块小结”')
+  requireMatch('论文信息与阅读边界', /论文信息与阅读边界/)
+  requireMatch('一句话击穿', /一句话击穿[：:]/)
+  requireMatch('一眼看懂全文', /一眼看懂全文/)
+  requireMatch('逻辑图节点', /机制节点/)
+  requireMatch('逻辑图关系', /机制关系/)
+  requireMatch('章节关键推理链', /(?:逻辑路径|关键链条|推理链)/)
+  requireMatch('题目分析', /题目分析/)
+  requireMatch('题目策略分析', /题目策略分析/)
+  requireMatch('显式逻辑连接词', /\*\*(?:但是|因此|随后|由此|反而|最终|这意味着|关键在于)\*\*/)
+  requireMatch('通讯作者研究轨迹', /通讯作者研究轨迹/)
+  requireMatch('综述为什么这样写', /综述为什么这样写/)
+  requireMatch('摘要整体逻辑', /摘要整体逻辑/)
+  requireMatch('摘要逐句逻辑', /摘要第(?:[一二三四五六七八九十\d]+)句/)
+  requireMatch('写作结构总结', /本部分写作结构总结[：:]/)
+  requireMatch('作者怎样一步步证明', /作者怎样一步步证明/)
+  requireMatch('最强证据与逻辑缺口', /最强证据与逻辑缺口/)
+  requireMatch('真正难点讲解', /真正难点/)
+  requireMatch('知识点讲解', /知识(?:点)?讲解/)
+  requireMatch('指标或实验选择依据', /为什么(?:想到|选择|测量|采用)/)
+  requireMatch('跨领域知识桥', /跨领域知识桥/)
+  requireMatch('顶刊证据门槛', /顶刊|顶会|期刊.{0,8}(?:门槛|理由)/)
+  requireMatch('逻辑缺口产生的新 Idea', /逻辑缺口.{0,8}新\s*Idea/i)
+  requireMatch('可复现边界', /可复现(?:部分|边界)/)
   return missing
 }
 
 function buildCoverageRepairPrompt(draft: PaperDraft, answer: string, missing: string[]) {
-  const requiredShape = draft.module === 'reproduce'
-    ? `只输出代码复现报告。完整覆盖环境、数据、预处理、训练、评估与图表复现，每个阶段末尾写“阶段小结”，最后写“代码复现总小结”。`
-    : `先输出“论文结构与科研逻辑总图”，包含正向证明路线、反向必要证据图和逻辑断点；再严格输出“1. 题目与作者”“2. 综述逻辑”“3. 因果实验链”“4. 交叉知识桥”“5. 新 Idea 与顶刊理由”。通讯作者部分必须单列“通讯作者研究方向总结”，五个模块各自以“本模块小结”收尾。对摘要、Introduction/综述、方法/实验、结果、讨论/结论按本文真实结构分别做微逻辑拆解；没有全文证据时明确写待原文核验，绝不能编造。`
+  if (draft.module === 'reproduce') {
+    return `你是代码复现指南的校对者。论文理解与科研逻辑分析已经在另一个独立功能中完成；本轮只能修复复现指南，禁止重新分析题目、作者、摘要、综述、因果链、跨领域知识桥、期刊价值或新 Idea。
+
+论文：${draft.title}
+检测到缺失的复现部分：
+${missing.map((item, index) => `${index + 1}. ${item}`).join('\n')}
+
+请保留候选指南中正确且可执行的内容，并重写为一份面向零基础读者的完整复现手册。必须依次覆盖：复现边界与目标产物、环境从零搭建、数据获取与校验、预处理、代码目录与调用链、最小冒烟运行、完整训练/实验、评估与 Figure/Table 对齐、常见报错、掌握验收。每个阶段都要写清命令在哪个目录执行、命令每个关键参数的含义、成功时应看到什么、输出保存在哪里、失败时如何定位，并在末尾写“阶段小结”。最后写“代码复现总小结”。
+
+不得猜测不存在的仓库、文件、函数、数据、参数或实验结果。对每项内容标注“材料直接支持”“需要补写”“论文未公开”或“需要湿实验平台”。命令使用代码块；不要输出内部思考、论文深度分析或 Markdown 表格。
+
+候选复现指南：
+${answer.slice(0, 17000)}`.slice(0, 22000)
+  }
+  const requiredShape = `只输出一份连续报告，依次包含“论文信息与阅读边界”“一眼看懂全文”“题目分析”“通讯作者研究轨迹”“综述为什么这样写”“作者怎样一步步证明”“科研逻辑图”“最强证据与逻辑缺口”“真正难点与跨领域知识桥”“为什么达到该期刊/会议证据门槛”“从逻辑缺口产生的新 Idea”“可复现边界”。正文必须包含章节关键推理链、必要知识点讲解，并明确解释关键指标或实验为什么会被想到和选择。不要输出模块答卷、检查清单或思考过程。`
   return `你是论文分析报告的终审编辑。下面候选报告缺少强制结构，必须重写为一份连贯、完整的最终报告，而不是追加补丁或输出检查清单。
 
 论文：${draft.title}
@@ -281,15 +725,91 @@ ${missing.map((item, index) => `${index + 1}. ${item}`).join('\n')}
 重写要求：
 - ${requiredShape}
 - 保留候选报告中已有且有证据支持的深度内容，删除重复、散乱、模板化和无依据内容。
-- 每个微逻辑步骤写清“原文事实/证据 -> 叙事作用 -> 隐含前提 -> 推理或决策 -> 尚未解决 -> 因此下一步”。结构必须因本文而异，可以分叉、并行、回环或演绎，不得机械套用固定六步。
+- 按原文真实顺序解释每个段落或功能段落组：写了什么、为什么必须写在这里、怎样承接上一段、作者如何把事实推成判断、又为下一段或实验留下什么问题。
+- 在每个有原文材料支持的句子解释后加入一行“句子结构小结：语言结构——……；逻辑结构——……；写作意图（合理推断）——……”。每个段落解释后加入“段落结构小结”，每个二级部分结尾加入“本部分写作结构总结”。三类总结必须短而具体，不能重复正文；没有原文时只总结可见材料，禁止臆造句法或段落。
+- 每个功能先写连续段落，再输出至多一行“逻辑路径 功能名：A → B → C”；网页会把它压缩成单行“➡️”链，不得放入代码块。关键实验必须说明作者为什么想到当前解释、为什么选择该指标/对照、怎样实施以及结果怎样推动下一步。
+- 语义属于同一条论证时必须留在同一段，用 **但是**、**因此**、**随后**、**这意味着** 等加粗逻辑词显出转折和推进；只有互不依赖、需要分别成立的独立论点才另起段落并用 1️⃣、2️⃣、3️⃣ 编号。禁止把一句完整论证拆成许多碎点，也禁止为了排版而编号。
+- 至少在首次出现真正理解门槛时加入“知识讲解：概念名称”，用短段落解释定义、关键关系或反应式以及它在当前推理中的作用。
 - 只能使用候选报告与上方元数据已经支持的信息；不知道的内容标成待核验。
-- 全文使用简体中文，不使用 Markdown 表格或竖线分隔内容。
+- 一眼看懂全文中输出 4–8 个“机制节点”和 3–10 条“机制关系”，用于网页绘图；每行必须严格写成“机制节点：唯一ID | 简短中文名称 | 角色”或“机制关系：起点ID | 终点ID | 促进/抑制/支撑/反驳/约束/关联 | 关系说明”。图只服务本文一个最核心结论：一个节点只能表达一个变量、机制、证据功能或结果，节点名称不超过 12 个汉字；主链从左到右，分支和汇合只在原文证据需要时出现。关系说明供点击查看，不得把完整句子塞进图面。图的拓扑必须来自当前论文实际论证，不得套用线性链或任何示例；全文使用简体中文，不使用 Markdown 表格、代码块或 ASCII 图。
 
 候选报告：
 ${answer.slice(0, 17000)}`.slice(0, 22000)
 }
 
+function buildReproductionPrompt(draft: PaperDraft, webSearch: boolean) {
+  const source = [
+    draft.sourceText.trim() ? `论文材料：\n${draft.sourceText.trim()}` : '',
+    draft.sourceTextZh.trim() ? `中文翻译：\n${draft.sourceTextZh.trim()}` : '',
+  ].filter(Boolean).join('\n\n').slice(0, 11000) || '没有论文正文或摘要，只能制定待核验的复现准备步骤，不能声称已经确认实验细节。'
+
+  return `你是面向零基础学习者的论文复现导师。本项目的“论文深度全链路”已经是另一个独立功能，本轮只负责复现，绝对不要重新输出题目分析、通讯作者、摘要逐句、综述逻辑、作者科研逻辑、因果证据链、交叉知识桥、顶刊理由或新 Idea。
+
+论文标题：${draft.title.trim()}
+DOI / URL / arXiv：${draft.locator.trim() || '未提供'}
+期刊 / 会议：${draft.venue.trim() || '未提供'}
+研究类型：${draft.studyType || '待根据材料判断'}
+学习者水平：第一次复现论文，不熟悉虚拟环境、依赖、命令行、数据目录、训练和结果校验。
+允许联网核验公开仓库、数据和官方文档：${webSearch ? '是' : '否'}
+
+复现纪律：
+- 先判断这是纯计算、计算与湿实验混合、纯湿实验、理论、临床或系统论文，并据此说明“这次实际能复现到哪里”。这只是划定复现边界，不是再次分析论文。
+- 只把论文中需要重做的 Figure、Table、指标、模型输出或实验读出作为复现目标；逐项标注“材料直接支持”“需要补写”“论文未公开”或“需要湿实验平台”。
+- 不得猜测仓库地址、文件名、函数名、命令、数据集、样本量、超参数、结果数值或设备要求。没有证据就明确写“待核验”，并给出具体核验位置。
+- 若提供了代码附件，必须按真实文件建立入口、配置、数据加载、预处理、模型/实验、训练、评估和绘图调用链；没有代码时只能给出代码骨架与待补文件，不能伪装成原作者代码。
+- 所有命令都要说明：在哪个目录执行、每个关键参数是什么、为什么执行、成功时看到什么、生成文件在哪里、常见失败怎样排查。
+- 先做最小冒烟测试：环境检查 → 一个样本 → 一个 batch/一次实验 → 一个 epoch/最小流程 → 小规模结果。通过后才允许进入完整复现。
+- 结果对齐不能只写“接近论文”。必须说明论文目标、自己的输出、允许误差或趋势标准、随机种子、硬件/软件差异和无法对齐时的排查顺序。
+- 对湿实验部分，列出样本、试剂、设备、对照、操作条件、读出、统计和安全/伦理门槛；不能用代码步骤冒充湿实验复现。
+- 面向小白解释首次出现的术语，例如终端、工作目录、Python、虚拟环境、依赖、CUDA、随机种子、checkpoint、batch 和数据泄漏，但只在当前操作需要时解释。
+
+严格按下面结构输出：
+# ${draft.title.trim()}：可执行复现指南
+
+## 0. 这次复现的边界与最终产物
+只说明需要重做哪些 Figure/Table/指标/实验读出、公开材料是否足够、哪些部分不能在当前条件下完成。不要重复论文深度分析。
+
+## 1. 开始前需要认识的工具
+用初学者能理解的语言解释本次实际会用到的终端、工作目录、运行时、虚拟环境、依赖、CPU/GPU/CUDA和配置文件，并说明它们之间的关系。
+
+## 2. 从零搭建环境
+提供操作系统与硬件检查、创建隔离环境、安装依赖、版本锁定和验证命令。每条命令后解释目的、成功信号、输出位置和失败排查。末尾写“环境阶段小结”。
+
+## 3. 获取并检查数据
+说明数据来源、许可/申请、目录结构、文件含义、样本形状与单位、校验方法、训练/验证/测试划分及泄漏风险。先用一个样本验证。末尾写“数据阶段小结”。
+
+## 4. 预处理复现
+把原始数据到模型/统计输入的每一步对应到真实代码或待补代码，解释输入输出形状、参数来源和中间产物检查。末尾写“预处理阶段小结”。
+
+## 5. 代码地图与论文实验对应
+按真实目录说明入口文件、配置、数据加载、模型/实验模块、损失或统计、训练、评估和绘图之间怎样调用；逐项映射到要复现的 Figure/Table。没有真实代码时明确列出需要创建的最小文件，禁止捏造作者文件。
+
+## 6. 最小冒烟运行
+给出最小数据、最少步骤和最短时间的可运行检查，说明期望日志、成功标准、输出文件和常见错误。只有此阶段通过才能继续。
+
+## 7. 完整训练或完整实验
+给出从工作目录开始的顺序命令、配置、随机种子、硬件预算、运行时间估计、checkpoint/实验记录和中断恢复。末尾写“训练阶段小结”；非训练论文改成对应的“完整实验阶段小结”。
+
+## 8. 评估与 Figure/Table 复现
+逐项说明评估命令、指标定义、绘图命令、目标输出、允许误差或趋势标准，以及如何比较论文和本地结果。末尾分别写“评估阶段小结”和“图表复现阶段小结”。
+
+## 9. 报错与偏差排查
+按环境 → 数据 → 维度/单位 → 配置 → 随机性 → 硬件差异 → 论文未公开细节的顺序给出诊断路径，避免只给泛泛建议。
+
+## 10. 真正掌握的验收
+给出一项有预测的最小修改：先写为什么改、预期怎样变化、怎样运行、什么结果支持理解、什么结果说明理解错误。再列出学习者能否独立重建环境、解释数据流、定位代码、复现核心结果和诊断错误的验收标准。
+
+## 代码复现总小结
+只总结已经具备、仍缺失、当前可达到的复现层级、下一步唯一动作。不要回到论文深度分析。
+
+论文与附件材料：
+${source}
+
+格式要求：使用简体中文。命令必须放在带语言标识的代码块中；不要使用 Markdown 表格，不要输出思考过程。所有步骤都要具体到初学者能够照着操作，但不能把未经材料核验的示例写成真实命令。`.slice(0, 23500)
+}
+
 function buildPrompt(draft: PaperDraft, journalLogic: string, webSearch: boolean) {
+  if (draft.module === 'reproduce') return buildReproductionPrompt(draft, webSearch)
   const source = [
     draft.sourceText.trim() ? `英文原文：\n${draft.sourceText.trim()}` : '',
     draft.sourceTextZh.trim() ? `中文翻译：\n${draft.sourceTextZh.trim()}` : '',
@@ -343,13 +863,149 @@ ${moduleRequirements[draft.module]}
 ${source}
 
 格式要求：以一级标题“${draft.title.trim()}：深度阅读与复现报告”开始。只使用短段落、标题、编号列表、项目符号和纯文本逻辑箭头，禁止 Markdown 表格与竖线分隔内容；结尾必须给出“下一步只做一件事”，适合初学者立即执行。`
-  return prompt.slice(0, 22000)
+  const narrativeRules = `
+
+最高优先级叙事规则：
+- 不要把内部检查清单逐项打印出来。每个章节只保留 3–5 个真正改变论文推理方向的关键转折，其余细节合并进连续短段落。
+- 先识别本文独有的核心矛盾和原生逻辑，再决定转折数量与顺序。不得因为提示中列出了候选角色，就强行让本文出现背景、缺口、假说、因果、救援或落地等全部环节。
+- 每个功能先写一段完整、连贯的分析，再压缩为一条关键链；不能先列“研究对象、机制、表型”等互不连接的字段。
+- 每个关键转折都重建认知来源：作者先看到了什么证据或异常；这个观察为什么会让作者想到当前解释；所依赖的知识原理是什么；为什么选择当前指标、模型、对照或实验而不是其他方案；实验怎样真正落地；结果支持或否定了什么；它为什么迫使作者进入下一步。
+- 指标不能只报名称和升降。必须解释该指标与假说之间的反应式、定义、统计关系或机制联系，让初学者明白“为什么测它能够回答当前问题”。
+- 知识点只在首次成为理解障碍时插入，用“知识讲解：概念名称”开头写一个短段落，讲清概念、本文中承担的作用以及读者怎样用它继续理解下一步；禁止脱离论文写百科。
+- 交叉知识桥必须采用清楚的连续叙事：“本文的具体难点 -> 为什么会联想到该外领域知识 -> 两边变量/结构怎样对应 -> 怎样结合进本文 -> 它能解决什么 -> 最小验证与失效条件”。禁止只罗列学科名词。
+- 真正难点必须解释难在哪里、作者跨过难点所需的关键知识和证据，以及仍未解决的代价。随后寻找具有相似因果结构的外领域问题，用变量映射说明对应关系，并从对应关系推出可证伪的新 Idea。
+- 不要把一个句子拆成多个孤立分点；优先使用有因果连接词的短段落。只有并列比较、实验步骤或候选方案确实需要时才使用列表。
+- 任何框架图都禁止放进代码块。不要输出 Mermaid、ASCII 代码框或带竖线的伪表格。`
+  return `${prompt}${narrativeRules}`.slice(0, 23500)
+}
+
+function buildSectionPrompt(draft: PaperDraft, journalLogic: string, webSearch: boolean, section: typeof fullAnalysisSections[number]) {
+  const source = [
+    draft.sourceText.trim() ? `英文材料：\n${draft.sourceText.trim()}` : '',
+    draft.sourceTextZh.trim() ? `中文翻译：\n${draft.sourceTextZh.trim()}` : '',
+  ].filter(Boolean).join('\n\n').slice(0, 11000) || '没有论文正文或摘要。不得假装读过原文。'
+  const focus: Record<Exclude<PaperModule, 'full' | 'reproduce'>, string> = {
+    title_author: `先忠实翻译题目，再用一段话解释题目目的、读者仅从题目能获得什么、题目如何把对象—问题—机制/方法—表型/结果串成一句论证，以及标题动词承诺了多强的证据。随后用一条短链压缩题目逻辑。通讯作者部分也先写连续研究轨迹，再压缩为“早期积累 → 中间转向 → 本文位置 → 后续方向”；只保留与理解本文有关的可靠轨迹。`,
+    introduction: `按材料真实顺序阅读，但必须先讲整体、再拆句。先以“摘要整体逻辑”写一个连续段落，完整讲清摘要从起点问题、旧认识、关键转折、作者动作到结论边界为什么这样排列；随后用一条“逻辑路径 摘要总链：A → B → C”压缩整段。读者先理解全貌后，再把摘要拆成“摘要第1句、摘要第2句……”，不得跳过任何一句；每句先给忠实中文意译，再用一个连续段落讲透作者为什么必须在这里写它、想法来自哪项已知事实/前文证据/领域矛盾、承接上一句什么、新增哪一步论证、又怎样迫使下一句或实验出现。每句解释后必须补一行“句子结构小结”，分别概括原句的语言组织、逻辑动作与作者写作意图（合理推断）；摘要整体结束后补“段落结构小结”。若材料包含 Introduction，每一段也先写“引言第N段整体逻辑”，再解释段内每个可见句子并逐句小结，段末总结该段的起承转合，最后重建段落之间的总链；并指出引用某类文献承担的是建立共识、制造转折、暴露缺口还是限定边界。若当前只有摘要，只分析摘要并明确正文待核验，绝不能补造 Introduction 段落。`,
+    causal: `把方法、实验、结果和讨论按同一研究问题重新配对。每个关键实验先用连续段落解释“观察到了什么 → 为什么想到当前机制/方法 → 需要掌握什么知识 → 为什么选择这个指标、对照或实验 → 怎样落地 → 结果怎样改变判断 → 为什么还需要下一实验”。不能只复述步骤或指标升降。论文若不是机制研究，就使用其原生等价逻辑，例如算法设计—基准—消融—泛化或假设—命题—证明—反例。`,
+    cross_domain: `先用连续段落讲透本文最突出的 2–3 个真正难点，再逐个说明为什么会联想到某个领域外知识，而不是罗列领域名称。每条桥形成“本文难点 → 外领域解决的同构问题 → 两边变量和约束如何对应 → 哪些地方不对应 → 如何嵌入本文 → 能产生什么新解释或方案 → 最小验证与失败条件”。只保留能推动新 Idea 的桥。`,
+    ideas: `从全文主线连续解释论文最突出的贡献、最难完成的环节、最强证据、最弱跳跃和可能达到该期刊门槛的原因。再从尚未闭合的逻辑断点出发，结合前述跨领域对应推出少量可证伪新 Idea；必须把“断点怎样产生新假说、怎样落地、什么结果会否定它”讲成连续推理。`,
+  }
+  return `你正在为 Paper Lab 做幕后证据阅读，最终读者不会看到本轮原始输出。只能分析下方明确给出的这一篇论文；不得引入、比较或总结 Paper Lab 中的其他论文、旧报告或研究想法。禁止输出思考过程、<think>、任务复述、自适应路由清单、通用模板和大段领域百科。
+
+论文：${draft.title}
+期刊/会议：${draft.venue || '待核验'}
+研究类型线索：${draft.studyType}
+研究领域：${draft.domain}
+期刊方法学要求：${journalLogic}
+联网核验：${webSearch ? '允许' : '不允许'}
+通讯作者可靠信息：
+${draft.scholarlyContext || '无可靠信息，必须标为待核验'}
+
+本轮焦点：${section.heading}
+${focus[section.module]}
+
+共同规则：
+- 输出第一行必须是“一句话击穿：……”：只用一句话指出本阶段最改变读者理解的认知转折，不写空泛重要性。第二行必须是“逻辑路径 本阶段主线：A → B → C”，让读者先看见本阶段的起点、转折和落点，再阅读详细解释。
+- 本阶段结尾必须输出一行“本部分写作结构总结：语言结构——……；逻辑结构——……；作者写作策略（合理推断）——……；在全文中的作用——……”。只总结当前实际读到的材料；不得把作者意图写成已证实事实。
+- 紧接着只追加一次“可模仿结构框架：适用场景——……；写作骨架——[功能槽位A] → [功能槽位B] → [功能槽位C]；仿写句式——‘……’；避免照搬——……”。必须像用户示例一样具体：写作骨架提炼当前部分真实采用的推进方式，仿写句式保留可以替换的对象，避免照搬说明该框架何时不成立。它只是正文之后的学习附录，不能为了填写模板而缩短、改写或降低前面分析的深度。
+- 先从本文材料判断它自己的科研逻辑，绝不能把医学机制链套给算法、理论、观察、资源或系统论文。
+- 每个判断标清“材料直接支持”“合理推断”或“待全文核验”，但不要把标签堆成清单。
+- 除“摘要与引言逐句逐段逻辑”必须覆盖当前材料中的每一句外，其他阶段只保留 3–6 个真正推动本文逻辑的关键证据笔记。每条用连贯短段落解释前因后果；关键实验必须解释指标选择依据和所需知识点。
+- 不写完整报告，不重复其他阶段，不使用 Markdown 表格，不得输出“本阶段核验清单”或任何自检结果，控制在 1400 个中文字以内。
+
+当前可用论文材料：
+${source}`.slice(0, 22000)
+}
+
+function buildIntegrationPrompt(draft: PaperDraft, sections: { heading: string; answer: string }[]) {
+  const evidence = sections.map(section => `### ${section.heading}证据笔记\n${section.answer.slice(0, 3400)}`).join('\n\n')
+  const auditInstruction = draft.analysisDepth === 'adversarial'
+    ? '在幕后完成反方审查，删除相关冒充因果、模板套用、尺度错配和没有证据的结论；不要把审查清单打印给读者。'
+    : '检查证据边界和相互依赖，不能添加阶段证据之外的新事实。'
+  return `你是 Paper Lab 的论文逻辑编辑。五轮证据笔记全部属于下方标题所指的同一篇论文；不得加入、比较或总结任何其他论文。现在只输出一份从头到尾连续、没有重复的中文全文分析。读者最想知道的是：作者为什么写下每一段、怎样一步步把问题推到实验与结论，以及本文独有的突出点和难点。
+
+论文：${draft.title}
+期刊/会议：${draft.venue || '未提供'}
+研究设计：${draft.studyType}
+研究领域：${draft.domain}
+
+${auditInstruction}
+
+严格使用下面十二个二级标题。每个功能先写一段完整推理，再用一条“逻辑路径 功能名：A → B → C”压缩关键链。逻辑路径属于网页绘图数据，不放进代码块，正文渲染时会自动隐藏原始行并显示为紧凑的“A ➡️ B ➡️ C”，不能生成占据大面积的步骤卡片。
+
+标题之后、第一节之前必须先输出两行：第一行“一句话击穿：……”，用一句话讲清本文推翻、补足或重新连接了什么既有认识，以及决定性证据为什么改变判断；第二行“逻辑路径 20秒主线：核心矛盾 → 作者转向 → 决定性证据 → 新解释 → 结论边界”。这里追求认知清晰，不使用“重大、首次、颠覆”等没有证据的宣传词。
+
+全文必须遵守“语义分组”而不是“句子分点”：同一因果论证中的背景、转折、推断和下一步写在同一段，并把 **但是**、**因此**、**随后**、**由此**、**反而**、**最终** 等真正承担逻辑作用的连接词单独加粗，网页会显示为红色粗体下划线；不要加粗普通术语。只有两个观点逻辑上彼此独立、必须分别讨论时，才用 1️⃣、2️⃣、3️⃣ 开头分段。每个编号下面仍然必须是一段完整推理，不能变成字段清单。
+
+## 1. 论文信息与阅读边界
+给出题目、忠实中文译名、期刊/会议、年份、DOI、通讯作者、原文与代码/数据链接，并说明实际读到了全文、摘要、图表、补充材料还是仅元数据。缺失内容明确标为待核验，禁止用猜测填空。
+
+## 2. 一眼看懂全文
+先回答“读完这篇论文，读者原来的哪一个认识必须改变”，再用一个连续短段落讲清“核心矛盾是什么 → 旧解释为什么不够 → 哪项观察让作者转向 → 做了什么关键动作 → 哪项证据真正改变判断 → 得到什么 → 结论边界”。随后输出本文专属的机器绘图数据。图的结构由论文类型决定：机制论文画变量因果；算法论文画约束、设计、消融与泛化；理论论文画假设、命题、证明与反例；观察研究画现象、识别、混杂排除与稳健性；其他类型使用自己的结构。
+
+绘图数据每行严格采用以下格式，不放入代码块：
+机制节点：唯一ID | 简短中文名称 | 角色
+机制关系：起点ID | 终点ID | 促进/抑制/支撑/反驳/约束/关联 | 关系说明
+使用 4–8 个节点和 3–10 条边，只表达支撑一个核心结论的最短充分路径。名称不超过 12 个汉字；主链从左到右，分支上下展开；关系说明作为点击连线后的证据详情。材料不足时宁可标“待核验”，不可编造。
+
+## 3. 题目分析
+先忠实翻译题目。随后写“题目策略分析”：默认使用一段连续论证，解释标题想解决什么、仅从题目能知道什么、作者怎样把研究对象、问题、靶对象、机制/方法与表型/结果串成一句话，关键词怎样借用领域共识建立背景，限定词怎样收窄研究边界，以及 alters、impairs、predicts、associates、enables 等动词分别承诺了多强证据。若题目确实同时采用多个彼此独立的命名策略，才用 1️⃣、2️⃣、3️⃣ 分段；若它们共同服务同一策略，则留在一段并用加粗逻辑词串联。最后用一条逻辑路径压缩题目，不能列“研究对象/机制/表型”等孤立字段。
+
+## 4. 通讯作者研究轨迹
+用可靠资料把“早期核心问题 → 方法或模型积累 → 研究方向转折 → 本文怎样长出来 → 后续延伸”讲成连续研究故事，最后总结稳定研究方向。只保留与理解本文有关的轨迹，同名、猜测和无来源内容不得写成事实。
+
+## 5. 综述为什么这样写
+严格沿摘要和 Introduction 的真实顺序分析，并执行“整体优先、逐句证明、重新合流”。先用“摘要整体逻辑”写一个连续段落，让读者一次看懂这一整段为什么从当前起点推进到当前结论；紧接一条“逻辑路径 摘要总链：A → B → C”。然后使用“摘要第1句（中文意译）”“摘要第2句（中文意译）”这样的短标题逐句覆盖；每句下面只写一个连贯段落，突出解释作者为什么在这里写它、想法来自哪项已知事实/文献/矛盾、承接上一句什么、新增了哪一步判断、怎样引出下一句或实验，以及这句话是材料直接支持、合理推断还是待正文核验。每句后追加“句子结构小结：语言结构——……；逻辑结构——……；写作意图（合理推断）——……”，摘要末尾追加“段落结构小结”。若拿到了 Introduction，则每段先给“引言第N段整体逻辑”，再解释段内每个可见句子并逐句小结，段末写“段落结构小结”，最后用一个连续段落讲清各段怎样合成全文选题逻辑；并说明所引文献为什么是当前论证必需而非普通背景堆砌。若只拿到摘要，必须明确写“当前未读取 Introduction 正文”，不能编造段落。用户给出的“背景—转折—缺口—特点—方向—猜想”只是一种可能，必须按本文实际情况增删、分叉或回环。
+
+## 6. 作者怎样一步步证明
+这是全文核心。沿 Methods/Experiments、Results 与 Discussion 的真实顺序写连续段落。每个关键实验都要讲清“先看到什么 → 为什么想到当前解释 → 所需知识是什么 → 为什么选择该指标、对照或方法 → 怎样落地实施 → 若假说成立应看到什么 → 实际结果是什么 → 排除了什么 → 还不能推出什么 → 为什么进入下一步”。不能把这些问题拆成字段清单。
+
+遇到 NAD+/NADH、损失函数、识别变量、定理条件、消融、置信区间等真正影响理解的概念时，紧跟一个引用块：
+> **知识讲解：概念名称**
+> 用初学者能理解的语言说明定义、关键关系或反应式、本文为何需要它，以及理解它后怎样继续跟上作者的推理。只讲当前链条需要的知识，不写百科。
+
+## 7. 科研逻辑图
+用一段话指出全篇最短充分证明链是什么、哪里分叉、哪里通过反向或救援重新汇合。不要输出 ASCII、Mermaid 或代码图；只复用第 2 节的绘图数据，由网页生成成图。
+
+## 8. 最强证据与逻辑缺口
+用连续论证解释哪些证据把相关性推进为因果、证明或工程可信性，并做删除证据的反事实：删掉哪项实验后结论会降级。随后指出必要性、充分性、反向因果、混杂、测量伪影、数据泄漏、尺度迁移或外部效度中仍未闭合的部分。
+
+## 9. 真正难点与跨领域知识桥
+先讲透 2–3 个本文独有难点：为什么难、作者需要跨过什么认知或技术障碍、用了什么知识与证据、付出什么代价。然后只选 1–3 个具有相似因果结构的外领域对应，连续讲清“本文难点 → 为什么联想到该领域 → 两边变量/约束如何对应 → 哪里不能对应 → 怎样结合 → 能产生什么新解释或方案 → 最小验证与失败条件”。禁止只罗列学科名称。
+
+## 10. 为什么达到该期刊或会议的证据门槛
+把问题重要性、概念转折、不可替代证据、跨尺度验证和读者价值连成一段论证。必须写“从公开内容看可能因为”，不能虚构编辑或审稿人的心理；并说明删除哪一层证据后论文为何会降档。
+
+## 11. 从逻辑缺口产生的新 Idea
+最多给出 3 个 Idea。每个先用一段话解释“论文哪个断点 → 为什么想到新解释 → 借用了什么知识 → 怎样落地 → 什么结果支持或否定 → 失败能学到什么”，再附一条逻辑路径。不能只换数据集、模型名或应用场景；涉及最新颖性时标明仍需检索。
+
+## 12. 可复现边界
+用一段话说明公开数据、代码、权重和实验条件允许复现到哪一步，什么需要实验平台或作者资源。这里只给复现入口和边界；命令、文件、函数和 Figure/Table 验收步骤留给独立“代码复现”功能。
+
+完成上述正文后，只在全文最末输出一次“可模仿结构框架：适用场景——……；写作骨架——[可替换槽位A] → [可替换槽位B] → [可替换槽位C]；仿写句式——‘……’；避免照搬——……”。它是学习迁移附录，不得反过来压缩、改写或模板化前面的论文分析；框架必须来自本文真实写法，并随论文类型变化。
+
+排版纪律：不输出 <think>、任务复述、检查清单、Markdown 表格、代码块、ASCII 图或阶段小结；允许并要求“句子结构小结”“段落结构小结”“本部分写作结构总结”，全文最后只允许出现一次“可模仿结构框架”。不重复同一结论；主要使用连贯短段落。同一论证不拆点，独立论点才用 1️⃣、2️⃣、3️⃣；每节最多附一条逻辑路径，只有并列实验或 Idea 确实需要时才使用列表。
+
+五个阶段的证据摘要：
+${evidence}`.slice(0, 23500)
+}
+
+function withoutLeadingTitle(markdown: string) {
+  return normalizePaperReport(markdown).replace(/^#\s+[^\n]+\n+/, '').trim()
+}
+
+function assembleFullReport(draft: PaperDraft, sections: { heading: string; answer: string }[]) {
+  const body = sections
+    .map((section, index) => `## 阶段 ${index + 1}：${section.heading}\n\n${withoutLeadingTitle(section.answer)}`)
+    .join('\n\n---\n\n')
+  return `# ${draft.title.trim()}：论文科研逻辑完整报告\n\n${body}`
 }
 
 function buildAuditPrompt(draft: PaperDraft, firstPass: string) {
   const auditScope = draft.module === 'reproduce'
     ? `本轮只输出“代码复现”报告，不得混入题目作者、综述逻辑、交叉知识桥或新 Idea。必须覆盖 Figure/Table 到数据、环境、文件/函数、命令、输出和验收指标的映射；环境、数据、预处理、训练、评估和图表复现各阶段末尾都要有“阶段小结”，全文最后有“代码复现总小结”。`
-    : `本轮先输出论文结构与科研逻辑总图，再输出五个连续模块：1.题目与作者、2.综述逻辑、3.因果实验链、4.交叉知识桥、5.新 Idea 与顶刊理由。不得插入代码复现章节。总图必须同时包含正向证明路线和反向必要证据图，并标出两图不一致的逻辑断点。摘要、Introduction/综述、方法/实验、结果、讨论/结论都要按真实可见内容拆成微逻辑步骤；材料缺失时写待核验，禁止补写不存在的段落。通讯作者部分必须以“通讯作者研究方向总结”收尾。每个模块末尾必须有“本模块小结”，包含核心结论、直接证据、未解问题和下一模块的必要性。`
+    : `本轮必须保留第一轮的十二部分叙事结构：论文信息与阅读边界、一眼看懂全文、题目分析、通讯作者研究轨迹、综述为什么这样写、作者怎样一步步证明、科研逻辑图、最强证据与逻辑缺口、真正难点与跨领域知识桥、期刊/会议证据门槛、新 Idea、可复现边界。每部分先写一段连续推理，再附至多一条关键链；不得改回字段清单、审稿清单或代码格式。同一论证必须留在同一段，用加粗逻辑词标出转折和推进；只有独立观点才用 1️⃣、2️⃣、3️⃣ 分段。每个关键实验必须解释观察如何产生想法、知识依据、指标选择、落地方式和下一步。保留有证据价值的“本部分写作结构总结”；可模仿框架只在全文末尾出现一次，不能支配或压缩正文。代码命令与逐文件复现仍由独立“代码复现”功能负责。`
   return `你现在是匿名顶刊审稿人、因果推断专家、复现工程师和跨学科方法学家组成的联合审稿组。下面是一份第一轮论文分析。不要为它辩护，也不要只做摘要；请先攻击，再重建为一份更严格、更深入、可复现的最终报告。
 
 论文：${draft.title}
@@ -374,9 +1030,11 @@ ${auditScope}
 
 排版与叙事硬约束：
 - 禁止 Markdown 表格和任何竖线分隔表；把所有表格改写成纵向证据卡。
-- 开头先写 200 字摘要、论文原生逻辑身份和一条不超过 12 个节点的主线。
-- 每个证据节点都按“上一缺口 -> 为什么做 -> 方法与对照 -> 得到什么 -> 排除什么 -> 还缺什么 -> 下一步”展开。
-- 每章开头承接上一章，结尾明确指出下一章为什么必需，最终报告必须像一条连续推理而不是互不相干的问题答案。
+- 开头先写 200 字以内的“一眼看懂全文”，并给出论文原生逻辑身份和一条不超过 12 个节点的主线。
+- 每个关键转折用连续段落解释“观察证据 -> 为什么想到 -> 必要知识 -> 为什么选该指标/方法 -> 如何落地 -> 得到什么 -> 排除什么 -> 还缺什么 -> 下一步”，禁止把这些词打印成字段清单。
+- 同一推理中的句子不得拆成多个项目符号；用 **但是**、**因此**、**随后**、**这意味着** 等加粗逻辑词标出关系。只有相互独立的观点才用 1️⃣、2️⃣、3️⃣ 分段；关键链在网页中以紧凑的 ➡️ 单行显示。
+- 每章开头承接上一章，结尾自然制造下一章必须回答的问题；最终报告必须像一条连续推理而不是互不相干的问题答案。
+- 保留机器可解析的“机制节点/机制关系”和“逻辑路径 功能名：A → B → C”行，但不得放进代码块，网页会把它们转换为图形。
 
 第一轮分析如下：
 ${firstPass.slice(0, 16000)}`.slice(0, 22000)
@@ -399,19 +1057,29 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
   const [webSearch, setWebSearch] = useState(false)
   const [result, setResult] = useState<AgentRunResult | null>(null)
   const [running, setRunning] = useState(false)
-  const [analysisStage, setAnalysisStage] = useState<'grounding' | 'analysis' | 'audit' | 'repair'>('analysis')
+  const [analysisStage, setAnalysisStage] = useState<AnalysisStage>('analysis')
+  const [analysisProgress, setAnalysisProgress] = useState('')
+  const [checkpointProgress, setCheckpointProgress] = useState('')
   const [error, setError] = useState('')
   const [saveProjectId, setSaveProjectId] = useState(() => projects.find(project => project.system_key !== 'recycle')?.id ?? 0)
   const [saving, setSaving] = useState(false)
   const [savedIdeaId, setSavedIdeaId] = useState<number | null>(null)
+  const [savedIdeaVersion, setSavedIdeaVersion] = useState('')
+  const [reportDirty, setReportDirty] = useState(false)
+  const [editingReport, setEditingReport] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [discoveryPreferences, setDiscoveryPreferences] = useState<DiscoveryPreferences>(loadDiscoveryPreferences)
   const [discovery, setDiscovery] = useState<PaperDiscoveryResult | null>(null)
   const [discovering, setDiscovering] = useState(false)
   const [discoveryError, setDiscoveryError] = useState('')
   const [paperMetadata, setPaperMetadata] = useState<PaperScholarlyContext | null>(null)
   const [metadataLoading, setMetadataLoading] = useState(false)
+  const [diagram, setDiagram] = useState<PaperDiagramArtifact | null>(() => loadPaperDiagram(loadDraft()))
+  const [diagramUrl, setDiagramUrl] = useState('')
   const autoDiscoveryStarted = useRef(false)
   const metadataLookupKey = useRef('')
+  const activeRunId = useRef('')
+  const activeRunController = useRef<AbortController | null>(null)
 
   const activeProjects = projects.filter(project => project.system_key !== 'recycle')
   const scopeName = useMemo(() => {
@@ -427,6 +1095,50 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
   useEffect(() => {
     window.localStorage.setItem(DISCOVERY_KEY, JSON.stringify(discoveryPreferences))
   }, [discoveryPreferences])
+
+  useEffect(() => {
+    setDiagram(loadPaperDiagram(draft))
+  }, [draft.title, draft.locator, draft.analysisDepth, draft.sourceText.length])
+
+  useEffect(() => {
+    if (!diagram?.svg) {
+      setDiagramUrl('')
+      return
+    }
+    const url = URL.createObjectURL(new Blob([diagram.svg], { type: 'image/svg+xml;charset=utf-8' }))
+    setDiagramUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [diagram?.svg])
+
+  useEffect(() => {
+    const hasLegacyCheckpoint = LEGACY_CHECKPOINT_KEYS.some(key => Boolean(window.localStorage.getItem(key)))
+    if (!hasLegacyCheckpoint) return
+    LEGACY_CHECKPOINT_KEYS.forEach(key => window.localStorage.removeItem(key))
+    setResult(null)
+    setCheckpointProgress('已清除旧版阅读阶段；请按“先整体、后逐句”的新结构重新生成当前论文。')
+  }, [])
+
+  useEffect(() => {
+    const checkpoint = loadPaperCheckpoint(draft)
+    const sections = validPaperSections(checkpoint)
+    const completed = sections.length
+    const nextStage = fullAnalysisSections.findIndex(section => !sections.some(saved => saved.heading === section.heading))
+    setCheckpointProgress(completed
+      ? completed < fullAnalysisSections.length
+        ? `已保存 ${completed}/${fullAnalysisSections.length} 个有效阅读阶段；可以继续生成阶段 ${nextStage + 1}。`
+        : diagram
+          ? '五个阅读阶段已经完成；科研逻辑图已生成，可以重新绘制。'
+          : '五个阅读阶段已经完成；可以直接绘制科研逻辑图。'
+      : '')
+    if (checkpoint && completed > 0 && !result) {
+      const latest = sections.at(-1)
+      if (latest) setResult({
+        ...latest.result,
+        answer: partialStageReport(draft, sections),
+        proposals: sections.flatMap(section => section.result.proposals),
+      })
+    }
+  }, [draft.title, draft.locator, draft.analysisDepth, draft.sourceText.length, diagram])
 
   useEffect(() => {
     const previous = document.body.style.overflow
@@ -483,13 +1195,13 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
     setDraft(current => key === 'title' || key === 'locator' ? { ...current, [key]: value, scholarlyContext: '', authorDirectionSummary: '' } : { ...current, [key]: value })
   }
 
-  async function enrichPaper(targetDraft: PaperDraft = draft, reportError = true) {
+  async function enrichPaper(targetDraft: PaperDraft = draft, reportError = true, signal?: AbortSignal) {
     const key = `${targetDraft.title.trim()}|${targetDraft.locator.trim()}|${status?.configured ? 'translate' : 'metadata'}`
     metadataLookupKey.current = key
     setMetadataLoading(true)
     try {
       const params = new URLSearchParams({ title: targetDraft.title, locator: targetDraft.locator })
-      const context = await api.paperContext(params)
+      const context = await api.paperContext(params, signal)
       const scholarlyContext = formatScholarlyContext(context)
       let enriched: PaperDraft = {
         ...targetDraft,
@@ -511,7 +1223,7 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
             abstract: enriched.sourceText,
             topic: discoveryPreferences.query,
             scholarly_context: scholarlyContext,
-          })
+          }, signal)
           enriched = {
             ...enriched,
             titleZh: automatic.title_zh,
@@ -541,14 +1253,23 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
 
   async function run(targetDraft: PaperDraft = draft) {
     if (!targetDraft.title.trim() || !status?.configured) return
-    setRunning(true); setError(''); setSavedIdeaId(null)
+    const requestId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `paper-${Date.now()}`
+    const controller = new AbortController()
+    let completedStageCount = 0
+    activeRunId.current = requestId
+    activeRunController.current = controller
+    setRunning(true); setStopping(false); setError(''); setSavedIdeaId(null); setSavedIdeaVersion(''); setReportDirty(false); setEditingReport(false)
     try {
       let groundedDraft = targetDraft
-      if (!groundedDraft.scholarlyContext.trim() || !groundedDraft.venue.trim() || !groundedDraft.sourceText.trim()) {
+      const needsGrounding = groundedDraft.module === 'reproduce'
+        ? !groundedDraft.venue.trim() || !groundedDraft.sourceText.trim()
+        : !groundedDraft.scholarlyContext.trim() || !groundedDraft.venue.trim() || !groundedDraft.sourceText.trim()
+      if (needsGrounding) {
         setAnalysisStage('grounding')
         try {
-          groundedDraft = await enrichPaper(groundedDraft, false)
+          groundedDraft = await enrichPaper(groundedDraft, false, controller.signal)
         } catch (reason) {
+          if (controller.signal.aborted) throw reason
           const note = reason instanceof Error ? reason.message : '学术轨迹元数据暂时不可用。'
           groundedDraft = { ...groundedDraft, scholarlyContext: `自动核验未完成：${note}\n通讯作者与近年研究轨迹必须在原文、作者主页或 ORCID 中人工核验。` }
           setDraft(groundedDraft)
@@ -556,46 +1277,200 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
       }
       const mode: AgentMode = groundedDraft.module === 'causal' ? 'critique' : 'synthesize'
       const targetJournal = journalProfiles[groundedDraft.journalProfile] || journalProfiles.general
-      setAnalysisStage('analysis')
-      const firstPass = await api.runAgent({
-        prompt: buildPrompt(groundedDraft, targetJournal.logic, webSearch), mode,
+      const execute = (prompt: string, requestMode: AgentMode = mode, maxOutputTokens = 8192) => api.runAgent({
+        request_id: requestId,
+        prompt, mode: requestMode,
         scope_type: scope.type, scope_id: scope.type === 'all' ? null : scope.id,
         idea_id: null, model: status.default_model, reasoning_effort: status.reasoning_effort,
+        max_output_tokens: maxOutputTokens,
+        include_library_context: false,
         web_search: webSearch, attachment_ids: selectedFileIds,
-      })
-      let finalResult = { ...firstPass, answer: normalizePaperReport(firstPass.answer) }
-      setResult(finalResult)
-      if (groundedDraft.analysisDepth === 'adversarial') {
-        setAnalysisStage('audit')
-        const audited = await api.runAgent({
-          prompt: buildAuditPrompt(groundedDraft, firstPass.answer), mode: 'critique',
-          scope_type: scope.type, scope_id: scope.type === 'all' ? null : scope.id,
-          idea_id: null, model: status.default_model, reasoning_effort: status.reasoning_effort,
-          web_search: webSearch, attachment_ids: selectedFileIds,
-        })
-        finalResult = { ...audited, answer: normalizePaperReport(audited.answer) }
-        setResult(finalResult)
+      }, controller.signal)
+      const executeWithRetry = async (prompt: string, requestMode: AgentMode, maxOutputTokens: number, label: string) => {
+        try {
+          return await execute(prompt, requestMode, maxOutputTokens)
+        } catch (reason) {
+          if (controller.signal.aborted || !isProviderTimeout(reason)) throw reason
+          setAnalysisProgress(`${label}超时，正在自动压缩并重试一次…`)
+          const compactPrompt = `${prompt}\n\n这是超时后的自动压缩重试。保留关键证据与完整逻辑衔接，删除重复解释；阅读阶段控制在 900 个中文字以内，最终汇总只保留必要内容。不要输出思考过程。`.slice(0, 23900)
+          const compactLimit = Math.max(2048, Math.floor(maxOutputTokens * 0.7))
+          return execute(compactPrompt, requestMode, compactLimit)
+        }
       }
-      const missing = missingPaperSections(finalResult.answer, groundedDraft.module)
-      if (missing.length) {
-        setAnalysisStage('repair')
-        const repaired = await api.runAgent({
-          prompt: buildCoverageRepairPrompt(groundedDraft, finalResult.answer, missing), mode: 'critique',
-          scope_type: scope.type, scope_id: scope.type === 'all' ? null : scope.id,
-          idea_id: null, model: status.default_model, reasoning_effort: status.reasoning_effort,
-          web_search: webSearch, attachment_ids: selectedFileIds,
-        })
-        finalResult = { ...repaired, answer: normalizePaperReport(repaired.answer) }
+
+      let finalResult: AgentRunResult
+      if (groundedDraft.module === 'full') {
+        const checkpoint = loadPaperCheckpoint(groundedDraft)
+        const sectionResults = validPaperSections(checkpoint)
+        completedStageCount = sectionResults.length
+
+        if (sectionResults.length < fullAnalysisSections.length) {
+          const index = fullAnalysisSections.findIndex(section => !sectionResults.some(saved => saved.heading === section.heading))
+          const section = fullAnalysisSections[index]
+          setAnalysisStage('section')
+          setAnalysisProgress(`正在分阶段阅读 ${index + 1}/${fullAnalysisSections.length}：${section.label}`)
+          const sectionResult = await executeWithRetry(
+            buildSectionPrompt(groundedDraft, targetJournal.logic, webSearch, section),
+            section.module === 'causal' ? 'critique' : 'synthesize',
+            4096,
+            `第 ${index + 1} 阶段“${section.label}”`,
+          )
+          const normalizedSectionResult = { ...sectionResult, answer: normalizePaperReport(sectionResult.answer) }
+          if (!hasSubstantivePaperAnswer(normalizedSectionResult.answer)) {
+            throw new Error(`第 ${index + 1} 阶段没有返回有效正文，未计入完成进度；请重试当前阶段。`)
+          }
+          sectionResults.push({ heading: section.heading, answer: normalizedSectionResult.answer, result: normalizedSectionResult })
+          sectionResults.sort((left, right) => fullAnalysisSections.findIndex(section => section.heading === left.heading) - fullAnalysisSections.findIndex(section => section.heading === right.heading))
+          completedStageCount = sectionResults.length
+          savePaperCheckpoint(groundedDraft, sectionResults)
+          setCheckpointProgress(completedStageCount < fullAnalysisSections.length
+            ? `已保存 ${completedStageCount}/${fullAnalysisSections.length} 个阅读阶段；请查看输出，再决定是否继续。`
+            : '五个阅读阶段已经保存；可以直接绘制科研逻辑图。')
+          setResult({
+            ...normalizedSectionResult,
+            answer: partialStageReport(groundedDraft, sectionResults),
+            proposals: sectionResults.flatMap(item => item.result.proposals),
+          })
+          return
+        }
+
+        const latest = sectionResults.at(-1)!.result
+        finalResult = {
+          ...latest,
+          answer: partialStageReport(groundedDraft, sectionResults),
+          proposals: sectionResults.flatMap(section => section.result.proposals),
+        }
         setResult(finalResult)
+        setCheckpointProgress('五个阅读阶段已经完成；可以直接绘制科研逻辑图。')
+        return
+      } else {
+        setAnalysisStage('analysis')
+        setAnalysisProgress(groundedDraft.module === 'reproduce' ? '正在生成独立的可执行复现指南…' : '正在进行第一轮深度拆解…')
+        const firstPass = await executeWithRetry(buildPrompt(groundedDraft, targetJournal.logic, webSearch), mode, 8192, '第一轮分析')
+        finalResult = { ...firstPass, answer: normalizePaperReport(firstPass.answer) }
+        setResult(finalResult)
+        if (groundedDraft.module !== 'reproduce' && groundedDraft.analysisDepth === 'adversarial') {
+          setAnalysisStage('audit')
+          setAnalysisProgress('正在进行第二轮对抗审稿…')
+          const audited = await executeWithRetry(buildAuditPrompt(groundedDraft, firstPass.answer), 'critique', 8192, '第二轮对抗审稿')
+          finalResult = { ...audited, answer: normalizePaperReport(audited.answer) }
+          setResult(finalResult)
+        }
+        const missing = missingPaperSections(finalResult.answer, groundedDraft.module)
+        if (missing.length) {
+          setAnalysisStage('repair')
+          setAnalysisProgress('正在补齐缺失模块并重建报告…')
+          const repaired = await executeWithRetry(buildCoverageRepairPrompt(groundedDraft, finalResult.answer, missing), 'critique', 8192, '报告补全')
+          finalResult = { ...repaired, answer: normalizePaperReport(repaired.answer) }
+          setResult(finalResult)
+        }
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Paper analysis failed')
+      if (controller.signal.aborted || (reason instanceof DOMException && reason.name === 'AbortError')) {
+        setError('已停止本次分析。论文信息、旧报告和已经保存的内容均已保留。')
+      } else {
+        const message = reason instanceof Error ? reason.message : 'Paper analysis failed'
+        setError(targetDraft.module === 'full' && completedStageCount
+          ? `${message} 已保存 ${completedStageCount}/${fullAnalysisSections.length} 个阅读阶段；再次点击继续时不会重新生成前面的内容。`
+          : message)
+      }
     } finally {
-      setRunning(false)
+      if (activeRunId.current === requestId) {
+        activeRunId.current = ''
+        activeRunController.current = null
+        setRunning(false)
+        setStopping(false)
+        setAnalysisProgress('')
+      }
     }
   }
 
+  async function drawResearchLogicDiagram() {
+    const checkpoint = loadPaperCheckpoint(draft)
+    const sections = validPaperSections(checkpoint)
+    if (sections.length !== fullAnalysisSections.length) {
+      setError('请先完成五个论文分析阶段，再绘制科研逻辑图。')
+      return
+    }
+    if (!status?.configured) {
+      setError('请先配置 Agent 模型，再绘制科研逻辑图。')
+      return
+    }
+    const requestId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `paper-diagram-${Date.now()}`
+    const controller = new AbortController()
+    activeRunId.current = requestId
+    activeRunController.current = controller
+    setRunning(true); setStopping(false); setError(''); setAnalysisStage('diagram'); setAnalysisProgress('正在提取论文专属逻辑并绘制 Inkscape 矢量图…')
+    try {
+      const response = await api.runAgent({
+        request_id: requestId,
+        prompt: buildDiagramPrompt(draft, sections),
+        mode: 'synthesize',
+        scope_type: scope.type,
+        scope_id: scope.type === 'all' ? null : scope.id,
+        idea_id: null,
+        model: status.default_model,
+        reasoning_effort: status.reasoning_effort,
+        max_output_tokens: 4096,
+        include_library_context: false,
+        web_search: false,
+        attachment_ids: [],
+      }, controller.signal)
+      const spec = parsePaperDiagramSpec(response.answer, draft)
+      const artifact: PaperDiagramArtifact = {
+        version: 1,
+        identity: checkpointIdentity(draft),
+        generatedAt: new Date().toISOString(),
+        spec,
+        svg: renderInkscapeSvg(spec),
+      }
+      savePaperDiagram(draft, artifact)
+      setDiagram(artifact)
+      if (savedIdeaId) setReportDirty(true)
+      setCheckpointProgress('五个阅读阶段已经完成；科研逻辑图已生成，可以重新绘制。')
+    } catch (reason) {
+      if (controller.signal.aborted || (reason instanceof DOMException && reason.name === 'AbortError')) {
+        setError('已停止绘图；五个阶段的分析内容仍完整保留。')
+      } else {
+        setError(reason instanceof Error ? reason.message : '科研逻辑图生成失败，请重试。')
+      }
+    } finally {
+      if (activeRunId.current === requestId) {
+        activeRunId.current = ''
+        activeRunController.current = null
+        setRunning(false)
+        setStopping(false)
+        setAnalysisProgress('')
+      }
+    }
+  }
+
+  function downloadResearchLogicDiagram() {
+    if (!diagram?.svg) return
+    const url = URL.createObjectURL(new Blob([diagram.svg], { type: 'image/svg+xml;charset=utf-8' }))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = diagramFilename(draft.titleZh || draft.title)
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  async function stopAnalysis() {
+    if (!running || stopping) return
+    setStopping(true)
+    const requestId = activeRunId.current
+    const cancellation = requestId ? api.cancelAgentRun(requestId) : Promise.resolve({ cancelled: false })
+    activeRunController.current?.abort()
+    await cancellation.catch(() => undefined)
+  }
+
   async function runModule(module: PaperModule) {
+    if (module === 'full' && validPaperSections(loadPaperCheckpoint(draft)).length === fullAnalysisSections.length) {
+      if (!diagram) await drawResearchLogicDiagram()
+      return
+    }
     const nextDraft = { ...draft, module }
     setDraft(nextDraft)
     await run(nextDraft)
@@ -605,10 +1480,11 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
     if (!preferences.query.trim()) return
     setDiscovering(true); setDiscoveryError('')
     try {
+      const fromYear = Math.min(new Date().getFullYear() + 1, Math.max(1900, preferences.fromYear || defaultDiscovery.fromYear))
       const params = new URLSearchParams({
         q: preferences.query.trim(),
         venues: '',
-        from_year: String(new Date().getFullYear() - 3),
+        from_year: String(fromYear),
         limit: '12',
       })
       setDiscovery(await api.discoverPapers(params))
@@ -637,7 +1513,7 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
       authorDirectionSummary: '',
       goal: defaultDraft.goal,
       module: 'full',
-      analysisDepth: 'adversarial',
+      analysisDepth: 'deep',
     }
     setPaperMetadata({
       paper_id: paper.id,
@@ -658,6 +1534,9 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
     metadataLookupKey.current = ''
     setDraft(nextDraft)
     setSavedIdeaId(null)
+    setSavedIdeaVersion('')
+    setReportDirty(false)
+    setEditingReport(false)
     if (analyze) {
       if (!status?.configured) {
         setError('请先配置 Agent 模型，再运行论文全链路分析。')
@@ -671,15 +1550,27 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
     if (!result || !saveProjectId) return
     setSaving(true); setError('')
     try {
-      const saved = await api.createIdea({
-        title: `Paper reading: ${draft.title.trim()}`.slice(0, 240),
-        content: result.answer,
-        raw_text: [draft.title, draft.locator, draft.sourceText].filter(Boolean).join('\n\n'),
-        status: 'exploring',
-        tags: ['paper-reading', draft.module === 'cross_domain' ? 'cross-disciplinary' : 'research-logic', draft.module === 'reproduce' ? 'reproduction' : 'literature'],
-        project_id: saveProjectId,
-      })
+      const title = `${draft.module === 'reproduce' ? 'Paper reproduction' : 'Paper reading'}: ${draft.title.trim()}`.slice(0, 240)
+      const tags = draft.module === 'reproduce'
+        ? ['paper-reproduction', 'reproduction']
+        : ['paper-reading', draft.module === 'cross_domain' ? 'cross-disciplinary' : 'research-logic', 'literature']
+      const content = reportContentWithDiagram(result.answer, draft.module === 'reproduce' ? null : diagram)
+      const saved = savedIdeaId
+        ? await api.updateIdea(savedIdeaId, {
+          title, content, status: 'exploring', tags,
+          expected_updated_at: savedIdeaVersion || undefined,
+        })
+        : await api.createIdea({
+          title,
+          content,
+          raw_text: [draft.title, draft.locator, draft.sourceText].filter(Boolean).join('\n\n'),
+          status: 'exploring',
+          tags,
+          project_id: saveProjectId,
+        })
       setSavedIdeaId(saved.id)
+      setSavedIdeaVersion(saved.updated_at)
+      setReportDirty(false)
       await onChanged()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not save the report')
@@ -702,6 +1593,15 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
   const pdfUrl = paperMetadata?.pdf_url || ''
   const displayedAbstract = paperMetadata?.abstract || draft.sourceText
   const displayedVenue = paperMetadata?.venue || draft.venue
+  const activeCheckpoint = loadPaperCheckpoint(draft)
+  const activeSections = validPaperSections(activeCheckpoint)
+  const completedCheckpointStages = activeSections.length
+  const nextCheckpointStage = fullAnalysisSections.findIndex(section => !activeSections.some(saved => saved.heading === section.heading))
+  const continueLabel = completedCheckpointStages >= fullAnalysisSections.length
+      ? diagram ? '' : '使用 Inkscape 绘制科研逻辑图'
+      : completedCheckpointStages
+        ? `继续生成阶段 ${nextCheckpointStage + 1}`
+        : ''
 
   return <div className="modal-backdrop paper-lab-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}>
     <section className="paper-lab">
@@ -709,23 +1609,23 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
       <div className="paper-lab-body">
         <aside className="paper-lab-inputs">
           <section className="paper-radar">
-            <div className="paper-radar-heading"><div><strong>论文雷达</strong><span>自动检索、筛选与补全</span></div><Search size={17}/></div>
-            <label>你想跟进的研究主题<input value={discoveryPreferences.query} onChange={event => setDiscoveryPreferences(current => ({ ...current, query: event.target.value }))} placeholder="例如 EEG emotion recognition cross-subject"/></label>
+            <div className="paper-radar-heading"><div><strong>Hugging Face 论文雷达</strong><span>搜索 Papers，并自动筛选与补全</span></div><a href="https://huggingface.co/papers/trending" target="_blank" rel="noreferrer" title="打开 Hugging Face Trending Papers"><ExternalLink size={17}/></a></div>
+            <label>你想跟进的研究主题<input value={discoveryPreferences.query} onChange={event => setDiscoveryPreferences(current => ({ ...current, query: event.target.value }))} placeholder="直接搜索 Hugging Face Papers，例如 brain-computer interface foundation model"/></label>
             <div className="paper-topic-suggestions"><span>关键词提示</span><button type="button" onClick={() => setDiscoveryPreferences(current => ({ ...current, query: 'EEG emotion recognition cross-subject generalization' }))}>跨受试者情绪识别</button><button type="button" onClick={() => setDiscoveryPreferences(current => ({ ...current, query: 'brain-computer interface foundation model EEG' }))}>脑机接口基础模型</button><button type="button" onClick={() => setDiscoveryPreferences(current => ({ ...current, query: 'multimodal neural decoding causal mechanism' }))}>多模态神经解码</button></div>
             <label>目标期刊或会议<span>自动识别</span><input readOnly value="系统根据检索结果与论文类型自动匹配"/></label>
-            <div className="paper-radar-controls"><label>起始年份<input readOnly type="number" value={new Date().getFullYear() - 3}/></label><label className="paper-radar-auto"><input type="checkbox" checked disabled/> 每次打开自动更新</label></div>
-            <p className="paper-auto-note"><Sparkles size={13}/> 系统自动检索近三年论文，并补全题目、期刊、作者、摘要、DOI、原文链接和通讯作者轨迹。</p>
-            <button className="button secondary paper-discover" disabled={discovering || !discoveryPreferences.query.trim()} onClick={() => void searchPapers()}>{discovering ? <LoaderCircle className="spin" size={15}/> : <Search size={15}/>} 自动检索论文</button>
+            <div className="paper-radar-controls"><label>起始年份<span>可手动调整</span><input type="number" min="1900" max={new Date().getFullYear() + 1} value={discoveryPreferences.fromYear || ''} onChange={event => setDiscoveryPreferences(current => ({ ...current, fromYear: event.target.value === '' ? 0 : Number(event.target.value) }))} onBlur={() => setDiscoveryPreferences(current => ({ ...current, fromYear: Math.min(new Date().getFullYear() + 1, Math.max(1900, current.fromYear || defaultDiscovery.fromYear)) }))}/></label><label className="paper-radar-auto"><input type="checkbox" checked disabled/> 每次打开自动更新</label></div>
+            <p className="paper-auto-note"><Sparkles size={13}/> 优先搜索 Hugging Face Papers，并补全题目、作者、摘要、热度、代码、原文链接和通讯作者轨迹；网络不可用时自动切换学术元数据源。</p>
+            <button className="button secondary paper-discover" disabled={discovering || !discoveryPreferences.query.trim()} onClick={() => void searchPapers()}>{discovering ? <LoaderCircle className="spin" size={15}/> : <Search size={15}/>} 搜索 Hugging Face Papers</button>
             {discoveryError && <p className="paper-radar-error">{discoveryError}</p>}
             {discovery && <div className="paper-discovery-results">
               <div className="paper-discovery-summary"><span>{discovery.papers.length} 篇候选</span><span>{discovery.sources.join(' + ')}</span></div>
               {discovery.warnings.map(warning => <p className="paper-radar-warning" key={warning}>{warning}</p>)}
               {discovery.papers.length === 0 ? <p className="paper-radar-empty">没有找到同时满足关键词、期刊和年份的论文，请放宽期刊或年份。</p> : discovery.papers.map(paper => <article className="paper-candidate" key={paper.id}>
-                <div className="paper-candidate-meta"><span>{paper.year || '日期未知'}</span><span>{paper.venue || '期刊未知'}</span><span>{paper.cited_by_count} 引用</span></div>
+                <div className="paper-candidate-meta"><span>{paper.year || '日期未知'}</span><span>{paper.venue || '期刊待核验'}</span>{paper.upvotes > 0 && <span>HF {paper.upvotes} 赞</span>}<span>{paper.cited_by_count} 引用</span></div>
                 <strong>{paper.title}</strong>
                 <p>{paper.authors.slice(0, 4).join(', ')}{paper.authors.length > 4 ? ' 等' : ''}</p>
                 <div className="paper-candidate-reasons">{paper.match_reasons.map(reason => <span key={reason}>{reason}</span>)}</div>
-                <footer><a href={paper.url} target="_blank" rel="noreferrer" title="打开论文元数据或 DOI"><ExternalLink size={13}/></a><button className="button secondary small" onClick={() => void useDiscoveredPaper(paper, false)}>查看论文</button><button className="button primary small" disabled={running} onClick={() => void useDiscoveredPaper(paper, true)}><Sparkles size={13}/> 自动补全并分析</button></footer>
+                <footer><a href={paper.url} target="_blank" rel="noreferrer" title="打开 Hugging Face 论文页或原文"><ExternalLink size={13}/></a>{paper.github_url && <a href={paper.github_url} target="_blank" rel="noreferrer" title="打开论文代码"><Code2 size={13}/></a>}{paper.project_url && <a href={paper.project_url} target="_blank" rel="noreferrer" title="打开论文项目页"><Globe2 size={13}/></a>}<button className="button secondary small" onClick={() => void useDiscoveredPaper(paper, false)}>查看论文</button><button className="button primary small" disabled={running} onClick={() => void useDiscoveredPaper(paper, true)}><Sparkles size={13}/> 自动补全并单轮深拆</button></footer>
               </article>)}
             </div>}
           </section>
@@ -752,8 +1652,11 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
 
           {status && <div className={`paper-agent-status ${status.configured ? 'ready' : ''}`}><Sparkles size={15}/><div><strong>{status.configured ? `${status.provider_label} · ${status.default_model}` : 'Agent connection required'}</strong><span>{status.configured ? status.web_search_supported ? 'Provider can verify sources with web search.' : 'No provider web search: author history and exact results will be marked for verification.' : 'Configure a provider before running Paper Lab.'}</span></div>{!status.configured && <button onClick={onOpenAgent}>Configure</button>}</div>}
           {status?.configured && <label className="paper-web-toggle" title="由系统根据模型能力自动设置"><input type="checkbox" checked={webSearch} disabled/><Globe2 size={14}/> {status.web_search_supported ? '模型联网核验已自动开启' : '当前模型不支持联网搜索；未核验内容会明确标注'}</label>}
-          <div className="paper-depth"><div><strong>分析严谨度</strong><span>双轮模式会额外调用一次模型</span></div><div><button className={draft.analysisDepth === 'deep' ? 'active' : ''} onClick={() => update('analysisDepth', 'deep')}>单轮深拆</button><button className={draft.analysisDepth === 'adversarial' ? 'active' : ''} onClick={() => update('analysisDepth', 'adversarial')}>双轮对抗审稿</button></div></div>
-          {running && <div className="paper-running-stage"><LoaderCircle className="spin" size={15}/>{analysisStage === 'grounding' ? '正在核验论文与作者…' : analysisStage === 'audit' ? '正在进行第二轮对抗审稿…' : analysisStage === 'repair' ? '正在补齐缺失模块并重建报告…' : '正在进行第一轮深度拆解…'}</div>}
+          {draft.module === 'reproduce'
+            ? <div className="paper-depth"><div><strong>独立复现模式</strong><span>只生成环境、数据、代码、运行、对齐和排错步骤，不重复论文深度分析</span></div><div><button className="active" disabled>复现执行</button></div></div>
+            : <div className="paper-depth"><div><strong>分析严谨度</strong><span>全链路会分阶段阅读；双轮模式在最终汇总时追加对抗审稿</span></div><div><button className={draft.analysisDepth === 'deep' ? 'active' : ''} onClick={() => update('analysisDepth', 'deep')}>单轮深拆</button><button className={draft.analysisDepth === 'adversarial' ? 'active' : ''} onClick={() => update('analysisDepth', 'adversarial')}>双轮对抗审稿</button></div></div>}
+          {running && <div className="paper-running-stage"><span><LoaderCircle className="spin" size={15}/>{analysisProgress || (analysisStage === 'grounding' ? '正在核验论文与作者…' : '正在分析论文…')}</span><button type="button" disabled={stopping} onClick={() => void stopAnalysis()} title="停止当前分析" aria-label="停止当前分析"><Square size={11} fill="currentColor"/>{stopping ? '正在停止' : '停止'}</button></div>}
+          {checkpointProgress && <div className="paper-checkpoint-status"><span><Save size={13}/>{checkpointProgress}</span>{continueLabel && !running && <button className="button primary small" type="button" onClick={() => completedCheckpointStages >= fullAnalysisSections.length ? void drawResearchLogicDiagram() : void run(draft)}>{completedCheckpointStages >= fullAnalysisSections.length ? <Network size={13}/> : <Sparkles size={13}/>} {continueLabel}</button>}</div>}
         </aside>
 
         <section className="paper-lab-output">
@@ -778,10 +1681,11 @@ export function PaperWorkspace({ scope, ideas, projects, groups, onClose, onChan
             </div>
           </section>}
           {!result ? <div className="paper-empty"><ShieldAlert size={28}/><h3>Build the evidence chain before trusting the story</h3><ol><li><strong>Ground</strong><span>Add the exact title and as much source text as you have.</span></li><li><strong>Reconstruct</strong><span>Match the paper's claims to the proof standard of its field and venue.</span></li><li><strong>Challenge</strong><span>Find the counterfactual, failure case, or competing explanation.</span></li><li><strong>Bridge</strong><span>Abstract the bottleneck and test knowledge transfers from other fields.</span></li><li><strong>Reproduce</strong><span>Map figures to data, code, commands, outputs, and acceptance checks.</span></li><li><strong>Extend</strong><span>Turn unresolved boundaries into testable ideas for your own work.</span></li></ol></div> : <>
-            <div className="paper-result-head"><div><span>Current report</span><strong>{modules.find(item => item.id === draft.module)?.label}</strong></div><div><span>{result.provider}</span><span>{result.model}</span><span>{result.context_summary.files} files</span></div></div>
-            {running && <div className="paper-refreshing"><LoaderCircle className="spin" size={14}/> A new analysis is running; the previous report stays visible.</div>}
-            <article className="markdown paper-report"><IdeaMarkdown content={result.answer} ideas={ideas} attachments={availableFiles} onIdeaSelect={onIdeaSelect} onFileOpen={id => void api.openAttachment(id)}/></article>
-            <section className="paper-save"><div><strong>{savedIdeaId ? 'Report saved to IdeaMiner' : 'Keep this report'}</strong><span>{savedIdeaId ? 'It is now searchable and can be connected to other ideas.' : 'Save the complete report as an exploring idea in one of your projects.'}</span></div>{savedIdeaId ? <button className="button secondary small" onClick={() => onIdeaSelect(savedIdeaId)}><Check size={14}/> Open saved idea</button> : <div><select value={saveProjectId} onChange={event => setSaveProjectId(Number(event.target.value))}>{activeProjects.map(project => <option value={project.id} key={project.id}>{project.name}</option>)}</select><button className="button primary small" disabled={saving || !saveProjectId} onClick={() => void saveReport()}>{saving ? <LoaderCircle className="spin" size={14}/> : <Save size={14}/>} Save report</button></div>}</section>
+            <div className="paper-result-head"><div><span>Current report</span><strong>{modules.find(item => item.id === draft.module)?.label}</strong></div><div><span>{result.provider}</span><span>{result.model}</span><span>{result.context_summary.files} files</span><button className="paper-edit-toggle" type="button" onClick={() => setEditingReport(current => !current)}><Pencil size={12}/>{editingReport ? '完成编辑' : '编辑报告'}</button></div></div>
+            {running && <div className="paper-refreshing"><span><LoaderCircle className="spin" size={14}/> 新分析正在运行，旧报告会继续保留。</span><button type="button" disabled={stopping} onClick={() => void stopAnalysis()}><Square size={11} fill="currentColor"/>{stopping ? '正在停止' : '停止'}</button></div>}
+            {diagram && diagramUrl && <section className="paper-inkscape-diagram"><header><div><span>INKSCAPE SVG</span><strong>{diagram.spec.title}</strong><p>{diagram.spec.subtitle}</p></div><button className="button secondary small" type="button" onClick={downloadResearchLogicDiagram}><Download size={14}/> 下载 SVG</button></header><figure><img src={diagramUrl} alt={`${diagram.spec.title}科研逻辑图`}/><figcaption>{diagram.spec.conclusion}</figcaption></figure></section>}
+            <section className="paper-save"><div><strong>{savedIdeaId ? reportDirty ? '报告有尚未保存的修改' : '这篇论文分析已保存' : '保存这篇论文分析'}</strong><span>{savedIdeaId ? reportDirty ? '点击更新，将手动补充保存回同一条 Paper Lab 记录。' : '下次从 Paper Lab 的 ideas 列表直接打开，不需要重新调用模型。' : '选择一个项目后保存完整报告，关闭电脑后仍会保留在本地数据库。'}</span></div><div>{!savedIdeaId && <select value={saveProjectId} onChange={event => setSaveProjectId(Number(event.target.value))}>{activeProjects.map(project => <option value={project.id} key={project.id}>{project.name}</option>)}</select>}{savedIdeaId && <button className="button secondary small" onClick={() => onIdeaSelect(savedIdeaId)}><Check size={14}/> 打开已保存分析</button>}{(!savedIdeaId || reportDirty) && <button className="button primary small" disabled={saving || !saveProjectId} onClick={() => void saveReport()}>{saving ? <LoaderCircle className="spin" size={14}/> : <Save size={14}/>} {savedIdeaId ? '更新保存' : '保存到 Paper Lab'}</button>}</div></section>
+            {editingReport ? <section className="paper-report-editor"><label htmlFor="paper-report-source">编辑 Markdown 报告</label><textarea id="paper-report-source" value={result.answer} onChange={event => { setResult(current => current ? { ...current, answer: event.target.value } : current); setReportDirty(true) }} spellCheck={false}/><p>修改后点击“完成编辑”预览；已经保存过的报告需要再点“更新保存”。</p></section> : <article className="markdown paper-report"><IdeaMarkdown content={result.answer} ideas={ideas} attachments={availableFiles} onIdeaSelect={onIdeaSelect} onFileOpen={id => void api.openAttachment(id)}/></article>}
             {result.proposals.length > 0 && <section className="paper-proposals"><header><strong>Candidate ideas</strong><span>Nothing changes until you approve it.</span></header>{result.proposals.map(proposal => <article className={`agent-proposal ${proposal.status}`} key={proposal.id}><div><span>{proposal.action_type.replaceAll('_', ' ')}</span><strong>{proposal.title}</strong><p>{proposal.rationale}</p><small>{proposalPreview(proposal)}</small></div>{proposal.status === 'pending' ? <aside><button className="button secondary small" onClick={() => void resolve(proposal, 'dismiss')}>Dismiss</button><button className="button primary small" onClick={() => void resolve(proposal, 'apply')}><Check size={14}/> Apply</button></aside> : <em>{proposal.status}</em>}</article>)}</section>}
           </>}
         </section>

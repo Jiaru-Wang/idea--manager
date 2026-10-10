@@ -1,13 +1,13 @@
-# IdeaMiner
+# Paper Lab
 
-IdeaMiner is a local-first research idea manager built with React, TypeScript, FastAPI, SQLite FTS5, and Cytoscape.js. It captures ideas without rewriting the original text, organizes them into projects, and visualizes how they develop and connect.
+Paper Lab is a local-first scientific paper reasoning workspace built with React, TypeScript, FastAPI, SQLite FTS5, and Cytoscape.js. Its primary workflow is to reconstruct each paper's native research logic, explain why every section and experiment exists, preserve the complete staged analysis, and turn unresolved evidence gaps into testable new ideas.
 
 Your SQLite database is the canonical source of truth. The core application runs locally and does not require an account, cloud database, or API key.
 
-## Research intelligence extensions
+## Core research workflow
 
-This fork extends the local idea garden into an evidence-first paper reading and
-research-design workspace:
+Paper Lab extends the original local idea garden into an evidence-first paper
+reading and research-design workspace:
 
 - **Paper Radar:** searches recent scholarly metadata through OpenAlex and
   Crossref, merges duplicate records, and sends selected papers directly into
@@ -47,13 +47,14 @@ Open **Paper Lab** from the top navigation to use these workflows. The image
 below shows the core local knowledge-garden interface that remains available
 behind the research workspace.
 
-![IdeaMiner core knowledge garden showing projects, filters, tags, stages, and research idea cards](docs/ideaminer-overview.png)
+![Paper Lab knowledge garden showing projects, filters, tags, stages, and research idea cards](docs/ideaminer-overview.png)
 
 _A privacy-safe example library. Your own ideas remain in the SQLite database beside your local installation._
 
-## When IdeaMiner earns its place
+## When Paper Lab earns its place
 
-- **A promising thought arrives before the project exists.** Capture it in `random_chat`; IdeaMiner preserves the original wording while you later refine it, tag it, and move it into a research project.
+- **A paper is difficult to follow despite understanding every sentence.** Paper Lab reconstructs the author's full reasoning chain, links experiments to the claims they prove, and keeps unresolved alternatives visible.
+- **A promising thought emerges from the evidence gap.** Capture it in `random_chat`; Paper Lab preserves the original wording while you later refine it, tag it, and move it into a research project.
 - **One hypothesis keeps branching.** Turn alternatives, experiments, evidence, and objections into linked descendant ideas, then use Lineage view to see how the reasoning evolved instead of losing it in a long document.
 - **The interesting connection crosses project boundaries.** Drag several cards into Dream, add an optional question, and use an agent to propose a new synthesis while keeping every source idea traceable.
 - **Your research must remain local.** Keep the canonical library in SQLite, reference nearby papers or code by file path without copying their contents, and write notes with Markdown and LaTeX.

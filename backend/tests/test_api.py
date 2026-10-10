@@ -1,7 +1,10 @@
+import asyncio
 import json
 import os
 import tempfile
 from pathlib import Path
+
+import httpx
 
 handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 handle.close()
@@ -13,9 +16,10 @@ os.environ.pop("IDEAMINER_AGENT_PROVIDER", None)
 os.environ.pop("IDEAMINER_AGENT_API_KEY", None)
 os.environ.pop("IDEAMINER_AGENT_BASE_URL", None)
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from backend.app.database import db
-from backend.app.main import _agent_context, app
+from backend.app.main import _agent_context, _run_agent_provider_cancellable, app, cancel_agent_run
 from backend.app.schemas import AgentRunRequest
 from backend.app.mcp_server import (
     copy_idea as mcp_copy_idea,
@@ -102,7 +106,10 @@ def test_minimax_chat_completions_provider(monkeypatch):
                 "choices": [{
                     "message": {
                         "content": json.dumps({
-                            "answer": "# MiniMax synthesis\n\nA structured result.",
+                            "answer": json.dumps({
+                                "answer": "<think>private chain of thought</think>\n# MiniMax synthesis\n\nA structured result.",
+                                "proposals": [],
+                            }),
                             "proposals": [],
                         })
                     }
@@ -110,8 +117,8 @@ def test_minimax_chat_completions_provider(monkeypatch):
             }
 
     class FakeClient:
-        def __init__(self, **_):
-            pass
+        def __init__(self, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
 
         async def __aenter__(self):
             return self
@@ -136,19 +143,96 @@ def test_minimax_chat_completions_provider(monkeypatch):
             "prompt": "Analyze this paper",
             "mode": "synthesize",
             "scope_type": "all",
+            "max_output_tokens": 4096,
         })
         assert result.status_code == 200
         assert result.json()["provider"] == "minimax"
         assert result.json()["answer"].startswith("# MiniMax synthesis")
+        assert "private chain of thought" not in result.json()["answer"]
         assert captured["url"] == "https://api.minimaxi.com/v1/chat/completions"
         assert captured["headers"]["Authorization"] == "Bearer minimax-test-key"
         assert captured["body"]["model"] == "MiniMax-M2.7"
+        assert captured["body"]["max_completion_tokens"] == 4096
         assert captured["body"]["messages"][0]["role"] == "system"
+        assert captured["timeout"].read == 300
         assert "minimax-test-key" not in str(result.json())
         client.delete("/api/agent/config/minimax")
 
 
+def test_minimax_timeout_returns_actionable_message(monkeypatch):
+    class TimeoutClient:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def post(self, url, headers, json):
+            raise httpx.ReadTimeout("", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr("backend.app.main.httpx.AsyncClient", TimeoutClient)
+    with TestClient(app) as client:
+        client.post("/api/agent/config", json={
+            "provider": "minimax",
+            "api_key": "minimax-test-key",
+            "model": "MiniMax-M2.7",
+            "remember_api_key": False,
+        })
+        result = client.post("/api/agent/runs", json={
+            "prompt": "Analyze this long paper",
+            "mode": "synthesize",
+            "scope_type": "all",
+        })
+        assert result.status_code == 504
+        assert "MiniMax 响应超时" in result.json()["detail"]
+        assert "300 秒" in result.json()["detail"]
+        assert "保留已经完成的阶段" in result.json()["detail"]
+        client.delete("/api/agent/config/minimax")
+
+
+def test_agent_output_limit_is_bounded():
+    with TestClient(app) as client:
+        result = client.post("/api/agent/runs", json={
+            "prompt": "Analyze this paper",
+            "mode": "synthesize",
+            "scope_type": "all",
+            "max_output_tokens": 20000,
+        })
+        assert result.status_code == 422
+
+
+def test_paper_agent_can_isolate_current_paper_from_library_ideas():
+    with TestClient(app) as client:
+        first = client.post("/api/ideas", json={"title": "Paper A"}).json()
+        second = client.post("/api/ideas", json={"title": "Paper B"}).json()
+        with db() as connection:
+            regular = _agent_context(connection, AgentRunRequest(prompt="Compare library"))
+            isolated = _agent_context(connection, AgentRunRequest(
+                prompt="Analyze only the selected paper",
+                include_library_context=False,
+            ))
+        assert {item["id"] for item in regular["ideas"]}.issuperset({first["id"], second["id"]})
+        assert isolated["ideas"] == []
+        assert isolated["relations"] == []
+        client.delete(f"/api/ideas/{first['id']}", params={"permanent": True})
+        client.delete(f"/api/ideas/{second['id']}", params={"permanent": True})
+
+
 def test_paper_discovery_merges_official_metadata_sources(monkeypatch):
+    huggingface = {
+        "results": [{
+            "id": "2506.00001",
+            "title": "Robust cross-subject EEG emotion recognition",
+            "summary": "A Hugging Face summary of the robust method.",
+            "publishedAt": "2025-06-01T08:00:00.000Z",
+            "authors": [{"name": "Jia Researcher"}],
+            "upvotes": 42,
+            "githubRepo": "https://github.com/example/eeg-method",
+        }]
+    }
     openalex = {
         "results": [{
             "id": "https://openalex.org/W1",
@@ -201,6 +285,8 @@ def test_paper_discovery_merges_official_metadata_sources(monkeypatch):
         async def get(self, url, params, headers):
             assert params
             assert headers["User-Agent"].startswith("IdeaMiner/")
+            if "huggingface" in url:
+                return FakeResponse(huggingface)
             return FakeResponse(openalex if "openalex" in url else crossref)
 
     monkeypatch.setattr("backend.app.main.httpx.AsyncClient", FakeClient)
@@ -212,16 +298,21 @@ def test_paper_discovery_merges_official_metadata_sources(monkeypatch):
         })
         assert response.status_code == 200
         payload = response.json()
-        assert payload["sources"] == ["OpenAlex", "Crossref"]
+        assert payload["sources"] == ["Hugging Face Papers", "OpenAlex", "Crossref"]
         assert len(payload["papers"]) == 1
         paper = payload["papers"][0]
         assert paper["doi"] == "10.1000/eeg.1"
-        assert paper["metadata_sources"] == ["Crossref", "OpenAlex"]
+        assert paper["metadata_sources"] == ["Crossref", "Hugging Face Papers", "OpenAlex"]
         assert paper["abstract"] == "A longer structured abstract for direct analysis."
+        assert paper["url"] == "https://huggingface.co/papers/2506.00001"
+        assert paper["upvotes"] == 42
+        assert paper["github_url"] == "https://github.com/example/eeg-method"
+        assert "Hugging Face 热门论文" in paper["match_reasons"]
         assert "目标期刊/会议匹配" in paper["match_reasons"]
 
 
 def test_paper_discovery_falls_back_when_venue_metadata_does_not_match(monkeypatch):
+    huggingface = {"results": []}
     openalex = {
         "results": [{
             "id": "https://openalex.org/W2",
@@ -260,6 +351,8 @@ def test_paper_discovery_falls_back_when_venue_metadata_does_not_match(monkeypat
             pass
 
         async def get(self, url, params, headers):
+            if "huggingface" in url:
+                return FakeResponse(huggingface)
             return FakeResponse(openalex if "openalex" in url else crossref)
 
     monkeypatch.setattr("backend.app.main.httpx.AsyncClient", FakeClient)
@@ -792,6 +885,32 @@ def test_dream_combines_cross_project_sources_with_dreams_tag(monkeypatch):
         born_links = [item for item in relations if item["target_id"] == born["id"] and item["relation_type"] == "inspired-by"]
         assert {item["source_id"] for item in born_links} == {first["id"], second["id"]}
         client.delete("/api/agent/config")
+
+
+def test_agent_provider_run_can_be_cancelled(monkeypatch):
+    async def exercise():
+        started = asyncio.Event()
+
+        async def slow_provider(_payload, _context):
+            started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("cancelled provider must not complete")
+
+        monkeypatch.setattr("backend.app.main._provider_agent", slow_provider)
+        app.state.agent_cancellations = {}
+        payload = AgentRunRequest(request_id="paper-stop-test", prompt="Analyze this paper")
+        task = asyncio.create_task(_run_agent_provider_cancellable(payload, {}))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert cancel_agent_run("paper-stop-test") == {"cancelled": True}
+        try:
+            await task
+            assert False, "a cancelled run must not return a result"
+        except HTTPException as error:
+            assert error.status_code == 409
+            assert error.detail == "本次分析已停止。"
+        assert cancel_agent_run("paper-stop-test") == {"cancelled": False}
+
+    asyncio.run(exercise())
 
 
 def test_tag_management_and_bulk_updates():

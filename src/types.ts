@@ -146,6 +146,9 @@ export interface DiscoveredPaper {
   url: string
   cited_by_count: number
   open_access: boolean
+  upvotes: number
+  github_url: string
+  project_url: string
   metadata_sources: string[]
   match_reasons: string[]
 }

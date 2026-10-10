@@ -1,4 +1,4 @@
-"""Coordinated local launcher for IdeaMiner's API and web UI."""
+"""Coordinated local launcher for Paper Lab's API and web UI."""
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def main() -> int:
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
 
-    print("\nIdeaMiner is starting. Keep this window open while you work.")
+    print("\nPaper Lab is starting. Keep this window open while you work.")
     print(f"Library: {os.environ['IDEAMINER_DB']}")
     print(f"Web:     {app_url}")
     print(f"API:     {api_url}")
@@ -116,21 +116,21 @@ def main() -> int:
         if api_ready and web_ready:
             webbrowser.open(start_url)
         else:
-            print("IdeaMiner did not become ready in time. Check the messages above.")
+            print("Paper Lab did not become ready in time. Check the messages above.")
             shutdown_requested.set()
 
         while not shutdown_requested.wait(0.5):
             if frontend.poll() is not None or not api_thread.is_alive():
-                print("A server stopped unexpectedly; shutting down IdeaMiner.")
+                print("A server stopped unexpectedly; shutting down Paper Lab.")
                 shutdown_requested.set()
     except KeyboardInterrupt:
-        print("\nStopping IdeaMiner...")
+        print("\nStopping Paper Lab...")
         shutdown_requested.set()
     finally:
         server.should_exit = True
         api_thread.join(timeout=8)
         _stop_frontend(frontend)
-        print("IdeaMiner stopped. Your ideas are safely stored.")
+        print("Paper Lab stopped. Your papers and ideas are safely stored.")
 
     return 0
 
