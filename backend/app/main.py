@@ -13,7 +13,7 @@ import subprocess
 import sys
 import uuid
 import xml.etree.ElementTree as ET
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -224,7 +224,7 @@ def _agent_context(connection: sqlite3.Connection, payload: AgentRunRequest) -> 
             raise HTTPException(400, "Choose a valid project group for the agent context")
         clauses.append("p.group_id=?")
         params.append(payload.scope_id)
-    rows = connection.execute(
+    rows = [] if not payload.include_library_context else connection.execute(
         f"""SELECT i.*, p.name project_name FROM ideas i
             LEFT JOIN projects p ON p.id=i.project_id
             WHERE {' AND '.join(clauses)} ORDER BY i.updated_at DESC LIMIT 40""",
@@ -242,7 +242,7 @@ def _agent_context(connection: sqlite3.Connection, payload: AgentRunRequest) -> 
         }
         for row in rows
     ]
-    if payload.idea_id is not None and not any(item["id"] == payload.idea_id for item in ideas):
+    if payload.include_library_context and payload.idea_id is not None and not any(item["id"] == payload.idea_id for item in ideas):
         selected = connection.execute(
             """SELECT i.*, p.name project_name FROM ideas i
                LEFT JOIN projects p ON p.id=i.project_id WHERE i.id=?""",
@@ -270,17 +270,25 @@ def _agent_context(connection: sqlite3.Connection, payload: AgentRunRequest) -> 
     files: list[dict[str, Any]] = []
     if payload.attachment_ids:
         unique_ids = list(dict.fromkeys(payload.attachment_ids))[:12]
-        if not idea_ids:
-            raise HTTPException(400, "No ideas are available for the selected file context")
         attachment_marks = ",".join("?" for _ in unique_ids)
-        idea_marks = ",".join("?" for _ in idea_ids)
-        attachment_rows = connection.execute(
-            f"""SELECT DISTINCT a.*, p.workspace_path FROM attachments a
-                JOIN projects p ON p.id=a.project_id
-                JOIN idea_attachments ia ON ia.attachment_id=a.id
-                WHERE a.id IN ({attachment_marks}) AND ia.idea_id IN ({idea_marks})""",
-            [*unique_ids, *idea_ids],
-        ).fetchall()
+        if payload.include_library_context:
+            if not idea_ids:
+                raise HTTPException(400, "No ideas are available for the selected file context")
+            idea_marks = ",".join("?" for _ in idea_ids)
+            attachment_rows = connection.execute(
+                f"""SELECT DISTINCT a.*, p.workspace_path FROM attachments a
+                    JOIN projects p ON p.id=a.project_id
+                    JOIN idea_attachments ia ON ia.attachment_id=a.id
+                    WHERE a.id IN ({attachment_marks}) AND ia.idea_id IN ({idea_marks})""",
+                [*unique_ids, *idea_ids],
+            ).fetchall()
+        else:
+            attachment_rows = connection.execute(
+                f"""SELECT DISTINCT a.*, p.workspace_path FROM attachments a
+                    JOIN projects p ON p.id=a.project_id
+                    WHERE a.id IN ({attachment_marks})""",
+                unique_ids,
+            ).fetchall()
         found_ids = {row["id"] for row in attachment_rows}
         if found_ids != set(unique_ids):
             raise HTTPException(400, "One or more selected files are outside the current idea scope")
@@ -308,7 +316,7 @@ def _agent_context(connection: sqlite3.Connection, payload: AgentRunRequest) -> 
         "ideas": ideas,
         "relations": relations,
         "files": files,
-        "privacy_note": "Original raw captures are not included. Attached file contents are sent only when explicitly selected for this run.",
+        "privacy_note": "Original raw captures are not included. Library ideas are omitted when isolation is requested. Attached file contents are sent only when explicitly selected for this run.",
     }
 
 
@@ -416,6 +424,29 @@ def _structured_from_text(text: str) -> tuple[str, list[dict[str, Any]]] | None:
     return None
 
 
+def _unwrap_answer_text(text: str) -> str:
+    current = text.strip()
+    for _ in range(3):
+        fenced = re.fullmatch(r"```(?:json)?\s*(\{.*\})\s*```", current, flags=re.IGNORECASE | re.DOTALL)
+        candidate = fenced.group(1).strip() if fenced else current
+        try:
+            parsed = json.loads(candidate)
+        except (TypeError, ValueError):
+            break
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("answer"), str):
+            break
+        current = parsed["answer"].strip()
+    return current
+
+
+def _visible_answer(text: str) -> str:
+    cleaned = re.sub(r"<think\b[^>]*>.*?</think>\s*", "", _unwrap_answer_text(text), flags=re.IGNORECASE | re.DOTALL)
+    if re.search(r"<think\b", cleaned, flags=re.IGNORECASE):
+        heading = re.search(r"(?m)^#{1,3}\s+\S", cleaned)
+        cleaned = cleaned[heading.start():] if heading else ""
+    return cleaned.strip()
+
+
 def _chat_result(result: dict[str, Any], provider_label: str) -> tuple[str, list[dict[str, Any]]]:
     choices = result.get("choices", [])
     if not choices:
@@ -429,17 +460,20 @@ def _chat_result(result: dict[str, Any], provider_label: str) -> tuple[str, list
                 arguments = function.get("arguments", {})
                 structured = json.loads(arguments) if isinstance(arguments, str) else arguments
                 proposals = structured.get("proposals", [])
-                return str(structured.get("answer", "")), proposals[:5] if isinstance(proposals, list) else []
+                return _visible_answer(str(structured.get("answer", ""))), proposals[:5] if isinstance(proposals, list) else []
             except (AttributeError, TypeError, ValueError) as error:
                 raise HTTPException(502, f"{provider_label} returned an unreadable structured result") from error
     content = str(message.get("content") or "").strip() if isinstance(message, dict) else ""
     if not content:
         raise HTTPException(502, f"{provider_label} did not return a readable research result")
     structured = _structured_from_text(content)
-    return structured if structured else (content, [])
+    if structured:
+        answer, proposals = structured
+        return _visible_answer(answer), proposals
+    return _visible_answer(content), []
 
 
-async def _call_agent_provider(config: dict[str, Any], *, model: str, reasoning_effort: str, instructions: str, input_text: str, web_search: bool = False) -> tuple[str, list[dict[str, Any]]]:
+async def _call_agent_provider(config: dict[str, Any], *, model: str, reasoning_effort: str, instructions: str, input_text: str, web_search: bool = False, max_output_tokens: int = 8192) -> tuple[str, list[dict[str, Any]]]:
     provider, provider_label = str(config["provider"]), str(config["label"])
     api_key = str(config.get("api_key", "")).strip()
     endpoint = str(config["base_url"]).rstrip("/")
@@ -450,7 +484,7 @@ async def _call_agent_provider(config: dict[str, Any], *, model: str, reasoning_
         headers.update({"x-api-key": api_key, "anthropic-version": "2023-06-01"})
         tool = _agent_tool()
         body: dict[str, Any] = {
-            "model": model, "max_tokens": 8192, "system": instructions,
+            "model": model, "max_tokens": max_output_tokens, "system": instructions,
             "messages": [{"role": "user", "content": input_text}],
             "tools": [{"name": tool["name"], "description": tool["description"], "input_schema": tool["parameters"], "strict": True}],
             "tool_choice": {"type": "tool", "name": "submit_research_result", "disable_parallel_tool_use": True},
@@ -477,13 +511,15 @@ async def _call_agent_provider(config: dict[str, Any], *, model: str, reasoning_
                 {"role": "user", "content": input_text},
             ],
         }
+        if provider == "minimax":
+            body["max_completion_tokens"] = max_output_tokens
     else:
         if not endpoint.endswith("/responses"):
             endpoint += "/responses"
         tools: list[dict[str, Any]] = [_agent_tool()]
         if web_search:
             tools.insert(0, {"type": "web_search"})
-        body = {"model": model, "instructions": instructions, "input": input_text, "tools": tools, "store": False}
+        body = {"model": model, "instructions": instructions, "input": input_text, "tools": tools, "store": False, "max_output_tokens": max_output_tokens}
         if reasoning_effort:
             body["reasoning"] = {"effort": reasoning_effort}
         if provider == "openai":
@@ -496,11 +532,20 @@ async def _call_agent_provider(config: dict[str, Any], *, model: str, reasoning_
             body["tool_choice"] = "auto"
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+    read_timeout_seconds = 300.0 if provider == "minimax" else 180.0
+    timeout = httpx.Timeout(read_timeout_seconds, connect=20.0, write=60.0, pool=20.0)
     try:
-        async with httpx.AsyncClient(timeout=90) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(endpoint, headers=headers, json=body)
+    except httpx.TimeoutException as error:
+        raise HTTPException(
+            504,
+            f"{provider_label} 响应超时：当前阅读阶段在 {int(read_timeout_seconds)} 秒内没有完成。"
+            "Paper Lab 会保留已经完成的阶段，并可从当前阶段继续。",
+        ) from error
     except httpx.RequestError as error:
-        raise HTTPException(502, f"Could not reach {provider_label}: {error}") from error
+        detail = str(error).strip() or error.__class__.__name__
+        raise HTTPException(502, f"无法连接 {provider_label}：{detail}") from error
     if response.status_code >= 400:
         try:
             error_body = response.json().get("error", {})
@@ -540,8 +585,9 @@ Always finish by calling submit_research_result. Write the answer in clear Markd
         config, model=model, reasoning_effort=reasoning_effort, instructions=instructions,
         input_text=f"User request:\n{payload.prompt}\n\nIdeaMiner context:\n{json.dumps(context, ensure_ascii=False)}",
         web_search=payload.web_search,
+        max_output_tokens=payload.max_output_tokens,
     )
-    return answer, proposals, model, provider
+    return _visible_answer(answer), proposals, model, provider
 
 
 def _dream_context(connection: sqlite3.Connection, idea_ids: list[int]) -> dict[str, Any]:
@@ -649,6 +695,11 @@ def _venue_matches(venue: str, requested: list[str]) -> bool:
 
 def _paper_reasons(item: dict[str, Any], requested_venues: list[str], from_year: int) -> list[str]:
     reasons: list[str] = []
+    if "Hugging Face Papers" in item.get("metadata_sources", []):
+        reasons.append("Hugging Face 热门论文")
+    upvotes = int(item.get("upvotes") or 0)
+    if upvotes:
+        reasons.append(f"Hugging Face {upvotes} 赞")
     if requested_venues and _venue_matches(str(item.get("venue", "")), requested_venues):
         reasons.append("目标期刊/会议匹配")
     if int(item.get("year") or 0) >= max(from_year, date.today().year - 1):
@@ -685,6 +736,9 @@ def _openalex_papers(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "url": str(work.get("doi") or (work.get("primary_location") or {}).get("landing_page_url") or work.get("id") or ""),
             "cited_by_count": int(work.get("cited_by_count") or 0),
             "open_access": bool((work.get("open_access") or {}).get("is_oa")),
+            "upvotes": 0,
+            "github_url": "",
+            "project_url": "",
             "metadata_sources": ["OpenAlex"],
         })
     return [paper for paper in papers if paper["title"]]
@@ -716,17 +770,78 @@ def _crossref_papers(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "url": str(work.get("URL") or (f"https://doi.org/{doi}" if doi else "")),
             "cited_by_count": int(work.get("is-referenced-by-count") or 0),
             "open_access": bool(work.get("license")),
+            "upvotes": 0,
+            "github_url": "",
+            "project_url": "",
             "metadata_sources": ["Crossref"],
         })
     return [paper for paper in papers if paper["title"]]
 
 
-async def _academic_json(client: httpx.AsyncClient, url: str, params: dict[str, Any]) -> dict[str, Any]:
+def _huggingface_papers(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        entries = next(
+            (payload.get(key) for key in ("results", "papers", "items", "dailyPapers") if isinstance(payload.get(key), list)),
+            [],
+        )
+    else:
+        entries = []
+    papers: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        nested = entry.get("paper") if isinstance(entry.get("paper"), dict) else {}
+        paper = {**nested, **entry}
+        paper_id = str(nested.get("id") or entry.get("id") or entry.get("arxivId") or "").strip()
+        title = str(entry.get("title") or nested.get("title") or "").strip()
+        published_at = str(entry.get("publishedAt") or nested.get("publishedAt") or paper.get("published_at") or "")
+        year_match = re.match(r"(\d{4})", published_at)
+        raw_authors = nested.get("authors") or entry.get("authors") or []
+        authors = [
+            str(author.get("name") or author.get("fullname") or "").strip() if isinstance(author, dict) else str(author).strip()
+            for author in raw_authors[:12]
+        ]
+        summary = str(
+            nested.get("summary")
+            or entry.get("summary")
+            or nested.get("abstract")
+            or entry.get("abstract")
+            or nested.get("ai_summary")
+            or entry.get("ai_summary")
+            or ""
+        )
+        papers.append({
+            "id": paper_id or title,
+            "title": title,
+            "abstract": _plain_text(summary)[:6000],
+            "publication_date": published_at[:10],
+            "year": int(year_match.group(1)) if year_match else 0,
+            "venue": "",
+            "authors": [author for author in authors if author],
+            "doi": "",
+            "url": f"https://huggingface.co/papers/{paper_id}" if paper_id else "https://huggingface.co/papers/trending",
+            "cited_by_count": 0,
+            "open_access": True,
+            "upvotes": int(nested.get("upvotes") or entry.get("upvotes") or 0),
+            "github_url": str(nested.get("githubRepo") or entry.get("githubRepo") or nested.get("github_url") or entry.get("github_url") or ""),
+            "project_url": str(nested.get("projectPage") or entry.get("projectPage") or nested.get("project_url") or entry.get("project_url") or ""),
+            "metadata_sources": ["Hugging Face Papers"],
+        })
+    return [paper for paper in papers if paper["title"]]
+
+
+async def _academic_payload(client: httpx.AsyncClient, url: str, params: dict[str, Any]) -> Any:
     response = await client.get(url, params=params, headers={"User-Agent": "IdeaMiner/0.1 scholarly-discovery"})
     response.raise_for_status()
     if len(response.content) > 2_000_000:
         raise ValueError("academic metadata response exceeded 2 MB")
-    data = response.json()
+    return response.json()
+
+
+async def _academic_json(client: httpx.AsyncClient, url: str, params: dict[str, Any]) -> dict[str, Any]:
+    data = await _academic_payload(client, url, params)
     if not isinstance(data, dict):
         raise ValueError("academic metadata response was not an object")
     return data
@@ -738,7 +853,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="IdeaMiner API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Paper Lab API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -774,8 +889,10 @@ async def discover_papers(
         "sort": "relevance", "order": "desc", "rows": fetch_size,
         "select": "DOI,title,abstract,published-print,published-online,issued,author,container-title,URL,is-referenced-by-count,license",
     }
+    huggingface_params = {"q": q.strip(), "limit": fetch_size}
     async with httpx.AsyncClient(timeout=httpx.Timeout(12.0), follow_redirects=True) as client:
         responses = await asyncio.gather(
+            _academic_payload(client, "https://huggingface.co/api/papers/search", huggingface_params),
             _academic_json(client, "https://api.openalex.org/works", openalex_params),
             _academic_json(client, "https://api.crossref.org/works", crossref_params),
             return_exceptions=True,
@@ -783,7 +900,7 @@ async def discover_papers(
 
     warnings: list[str] = []
     source_papers: list[list[dict[str, Any]]] = []
-    parsers = [("OpenAlex", _openalex_papers), ("Crossref", _crossref_papers)]
+    parsers = [("Hugging Face Papers", _huggingface_papers), ("OpenAlex", _openalex_papers), ("Crossref", _crossref_papers)]
     for response, (name, parser) in zip(responses, parsers):
         if isinstance(response, BaseException):
             warnings.append(f"{name} 暂时不可用，已使用其余来源。")
@@ -793,12 +910,15 @@ async def discover_papers(
         raise HTTPException(502, "论文元数据服务暂时不可用，请稍后重试。")
 
     merged: dict[str, dict[str, Any]] = {}
+    title_aliases: dict[str, str] = {}
     for papers in source_papers:
         for paper in papers:
             if paper["year"] and paper["year"] < from_year:
                 continue
             key = _paper_key(paper["doi"], paper["title"])
-            existing = merged.get(key)
+            title_key = _paper_key("", paper["title"])
+            existing_key = key if key in merged else title_aliases.get(title_key, "")
+            existing = merged.get(existing_key)
             if existing:
                 if len(paper["abstract"]) > len(existing["abstract"]):
                     existing["abstract"] = paper["abstract"]
@@ -806,11 +926,17 @@ async def discover_papers(
                 existing["venue"] = existing["venue"] or paper["venue"]
                 existing["doi"] = existing["doi"] or paper["doi"]
                 existing["url"] = existing["url"] or paper["url"]
+                existing["publication_date"] = existing["publication_date"] or paper["publication_date"]
+                existing["year"] = existing["year"] or paper["year"]
                 existing["cited_by_count"] = max(existing["cited_by_count"], paper["cited_by_count"])
                 existing["open_access"] = existing["open_access"] or paper["open_access"]
+                existing["upvotes"] = max(existing["upvotes"], paper["upvotes"])
+                existing["github_url"] = existing["github_url"] or paper["github_url"]
+                existing["project_url"] = existing["project_url"] or paper["project_url"]
                 existing["metadata_sources"] = sorted(set(existing["metadata_sources"] + paper["metadata_sources"]))
             else:
                 merged[key] = paper
+                title_aliases[title_key] = key
 
     query_tokens = {token for token in re.findall(r"[\w-]+", q.lower(), flags=re.UNICODE) if len(token) > 1}
     all_papers = list(merged.values())
@@ -827,7 +953,13 @@ async def discover_papers(
         title_tokens = set(re.findall(r"[\w-]+", paper["title"].lower(), flags=re.UNICODE))
         overlap = len(query_tokens & title_tokens) / max(len(query_tokens), 1)
         paper["match_reasons"] = _paper_reasons(paper, requested_venues, from_year)
-        paper["rank_score"] = round(overlap * 10 + min(paper["cited_by_count"], 250) / 100 + paper["year"] / 10_000, 4)
+        paper["rank_score"] = round(
+            overlap * 10
+            + min(paper["cited_by_count"], 250) / 100
+            + min(paper["upvotes"], 100) / 20
+            + paper["year"] / 10_000,
+            4,
+        )
     papers.sort(key=lambda item: (item["rank_score"], item["publication_date"]), reverse=True)
     for paper in papers:
         paper.pop("rank_score", None)
@@ -1253,11 +1385,54 @@ def forget_agent_profile(provider: str) -> dict[str, Any]:
     return agent_status()
 
 
+@app.post("/api/agent/runs/cancel/{request_id}")
+def cancel_agent_run(request_id: str) -> dict[str, bool]:
+    event = getattr(app.state, "agent_cancellations", {}).get(request_id)
+    if event is None:
+        return {"cancelled": False}
+    event.set()
+    return {"cancelled": True}
+
+
+async def _run_agent_provider_cancellable(
+    payload: AgentRunRequest, context: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]], str, str]:
+    request_id = payload.request_id.strip()
+    if not request_id:
+        return await _provider_agent(payload, context)
+
+    registry = getattr(app.state, "agent_cancellations", None)
+    if registry is None:
+        registry = {}
+        app.state.agent_cancellations = registry
+    cancellation = asyncio.Event()
+    registry[request_id] = cancellation
+    provider_task = asyncio.create_task(_provider_agent(payload, context))
+    cancellation_task = asyncio.create_task(cancellation.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {provider_task, cancellation_task}, return_when=asyncio.FIRST_COMPLETED,
+        )
+        if provider_task in done:
+            cancellation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cancellation_task
+            return provider_task.result()
+
+        provider_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await provider_task
+        raise HTTPException(409, "本次分析已停止。")
+    finally:
+        if registry.get(request_id) is cancellation:
+            registry.pop(request_id, None)
+
+
 @app.post("/api/agent/runs")
 async def run_agent(payload: AgentRunRequest) -> dict[str, Any]:
     with db() as connection:
         context = _agent_context(connection, payload)
-    answer, raw_proposals, model, provider = await _provider_agent(payload, context)
+    answer, raw_proposals, model, provider = await _run_agent_provider_cancellable(payload, context)
     allowed_actions = {"create_idea", "update_idea", "create_relation"}
     stored_context = {**context, "files": [{key: value for key, value in item.items() if key != "content"} for item in context["files"]]}
     with db() as connection:

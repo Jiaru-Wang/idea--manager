@@ -81,6 +81,7 @@ export function LineageView({ ideas, relations, onSelect }: { ideas: Idea[]; rel
   }, [focusId, incoming, onSelect, roots, visibleIdeas, visibleRelations])
 
   return <div className="lineage-view">
+    <div className="graph-scope-note"><strong>想法演化图</strong><span>这里展示论文或想法如何发展、分支和汇合，不展示单篇论文内部的实验机制。</span></div>
     <header className="lineage-toolbar">
       <div className="lineage-stats"><span><Route size={14}/>{roots.length} {roots.length === 1 ? 'root' : 'roots'}</span><span><GitBranch size={14}/>{branchCount} {branchCount === 1 ? 'branch point' : 'branch points'}</span><span><Merge size={14}/>{mergeCount} {mergeCount === 1 ? 'merge' : 'merges'}</span></div>
       <label>Focus track<select value={focusId ?? ''} onChange={event => setFocusId(event.target.value ? Number(event.target.value) : null)}><option value="">All tracks</option>{ideas.map(idea => <option value={idea.id} key={idea.id}>{idea.title}</option>)}</select></label>

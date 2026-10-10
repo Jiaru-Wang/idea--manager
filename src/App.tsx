@@ -229,7 +229,7 @@ export default function App() {
     try {
       setError('')
       const parsed: unknown = JSON.parse(await file.text())
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('The selected file is not an IdeaMiner JSON export')
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('The selected file is not a Paper Lab JSON export')
       const data = parsed as Record<string, unknown>
       const preview = await api.previewImport(data)
       setImportState({ filename: file.name, data, preview })
@@ -287,18 +287,18 @@ export default function App() {
   const styleForTag = (name: string) => tagStyle(name, tagGroupByName.get(name) || '')
 
   async function quitApplication() {
-    if (!window.confirm('Quit IdeaMiner and stop its local servers?')) return
+    if (!window.confirm('Quit Paper Lab and stop its local servers?')) return
     try {
       await api.quit()
       setStopped(true)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not stop IdeaMiner')
+      setError(e instanceof Error ? e.message : 'Could not stop Paper Lab')
     }
   }
 
   return <div className="app-shell">
     <header className="topbar">
-      <div className="brand"><div className="brand-mark"><Sprout size={22}/></div><div><strong>IdeaMiner</strong><span>research idea garden</span></div></div>
+      <div className="brand"><div className="brand-mark"><Sprout size={22}/></div><div><strong>Paper Lab</strong><span>deep paper analysis &amp; idea synthesis</span></div></div>
       <div className="top-actions">
         <button className="button agent-button" onClick={() => setAgentContext(null)}><Sparkles size={16}/> Agent</button>
         <button className="button paper-button" onClick={() => setPaperOpen(true)}><BookOpenText size={16}/> Paper Lab</button>
@@ -308,7 +308,7 @@ export default function App() {
         <button className="button import-button" onClick={() => importInput.current?.click()}><Upload size={16}/> Import</button>
         <input className="hidden-file-input" ref={importInput} type="file" accept="application/json,.json" onChange={event => { void chooseImportFile(event.target.files?.[0]); event.target.value = '' }}/>
         <div className="export-menu"><button className="button ghost"><Download size={16}/> Export</button><div><a href="/api/export/markdown" download>Markdown</a><a href="/api/export/json" download>JSON</a></div></div>
-        <button className="button quit-button" onClick={quitApplication} title="Quit IdeaMiner"><Power size={16}/> Quit</button>
+        <button className="button quit-button" onClick={quitApplication} title="Quit Paper Lab"><Power size={16}/> Quit</button>
         <button className="button primary" onClick={() => setEditor('new')}><Plus size={17}/> New idea</button>
       </div>
     </header>
@@ -336,7 +336,7 @@ export default function App() {
 
       <section className="workspace">
         <select className="mobile-project-select" value={scope.type === 'all' ? 'all' : `${scope.type}:${scope.id}`} onChange={event => { const [type, id] = event.target.value.split(':'); setScope(type === 'all' ? { type: 'all' } : { type: type as 'project' | 'group', id: Number(id) }) }}><option value="all">All active ideas</option>{projectGroups.map(group => <option value={`group:${group.id}`} key={`g${group.id}`}>Group: {group.name}</option>)}{projects.map(project => <option value={`project:${project.id}`} key={`p${project.id}`}>{project.system_key === 'recycle' ? 'Recycle' : project.name}</option>)}</select>
-        <div className="workspace-head"><div><p className="eyebrow">{scope.type === 'group' ? 'PROJECT GROUP' : currentProject?.system_key === 'recycle' ? 'RECYCLE BIN' : scope.type === 'project' ? 'PROJECT' : 'YOUR KNOWLEDGE GARDEN'}</p><h1>{query ? `Results in ${scopeTitle}` : activeTags.length ? `${scopeTitle} · #${activeTags[0]}` : scopeTitle}</h1><p>{ideas.length} {ideas.length === 1 ? 'thought' : 'thoughts'} · {relations.filter(r => ideas.some(i => i.id === r.source_id) && ideas.some(i => i.id === r.target_id)).length} visible connections</p></div><div className="workspace-actions">{currentProject && ideas.length > 0 && <button className="button bulk-delete" onClick={clearCurrentProject}><Trash2 size={15}/>{currentProject.system_key === 'recycle' ? 'Empty recycle' : 'Recycle all'}</button>}<div className="view-toggle"><button className={view === 'focus' ? 'active' : ''} onClick={() => switchView('focus')}><List size={16}/> Focus</button><button className={view === 'cards' ? 'active' : ''} onClick={() => switchView('cards')}><LayoutGrid size={16}/> Cards</button><button className={view === 'graph' ? 'active' : ''} onClick={() => switchView('graph')}><GitFork size={16}/> Graph</button><button className={view === 'lineage' ? 'active' : ''} onClick={() => switchView('lineage')}><Route size={16}/> Lineage</button></div></div></div>
+        <div className="workspace-head"><div><p className="eyebrow">{scope.type === 'group' ? 'PROJECT GROUP' : currentProject?.system_key === 'recycle' ? 'RECYCLE BIN' : scope.type === 'project' ? 'PROJECT' : 'YOUR KNOWLEDGE GARDEN'}</p><h1>{query ? `Results in ${scopeTitle}` : activeTags.length ? `${scopeTitle} · #${activeTags[0]}` : scopeTitle}</h1><p>{ideas.length} {ideas.length === 1 ? 'thought' : 'thoughts'} · {relations.filter(r => ideas.some(i => i.id === r.source_id) && ideas.some(i => i.id === r.target_id)).length} visible connections</p></div><div className="workspace-actions">{currentProject && ideas.length > 0 && <button className="button bulk-delete" onClick={clearCurrentProject}><Trash2 size={15}/>{currentProject.system_key === 'recycle' ? 'Empty recycle' : 'Recycle all'}</button>}<div className="view-toggle"><button className={view === 'focus' ? 'active' : ''} onClick={() => switchView('focus')}><List size={16}/> Focus</button><button className={view === 'cards' ? 'active' : ''} onClick={() => switchView('cards')}><LayoutGrid size={16}/> Cards</button><button title="论文或想法之间的知识库关系，不是单篇论文内部机制图" className={view === 'graph' ? 'active' : ''} onClick={() => switchView('graph')}><GitFork size={16}/> Idea map</button><button title="想法如何发展演化，不是单篇论文内部机制图" className={view === 'lineage' ? 'active' : ''} onClick={() => switchView('lineage')}><Route size={16}/> Idea lineage</button></div></div></div>
         {error && <div className="error-banner">{error}<button onClick={() => setError('')}><X size={15}/></button></div>}
         {loading ? <div className="loading"><Sprout/> Growing your garden…</div> : ideas.length === 0 ? <div className="empty-state"><div>{currentProject?.system_key === 'recycle' ? <Trash2 size={30}/> : <Lightbulb size={30}/>}</div><h2>{filtered ? 'No ideas match' : currentProject?.system_key === 'recycle' ? 'Recycle is empty' : 'Plant your first idea'}</h2><p>{filtered ? 'Try widening your filters or searching another phrase.' : currentProject?.system_key === 'recycle' ? 'Deleted topics will wait here until you restore or permanently remove them.' : 'Capture a research question, a surprising connection, or a half-formed hunch.'}</p>{currentProject?.system_key !== 'recycle' && <button className="button primary" onClick={filtered ? clearFilters : () => setEditor('new')}>{filtered ? 'Clear filters' : <><Plus size={17}/> Capture an idea</>}</button>}</div> : view === 'graph' ? <GraphView ideas={ideas} relations={relations} onSelect={openIdea}/> : view === 'lineage' ? <LineageView ideas={ideas} relations={relations} onSelect={openIdea}/> : view === 'focus' ? <div className={`focus-browser ${focusDensity}`}>
           <section className="focus-list-pane">
@@ -387,6 +387,6 @@ export default function App() {
     {reviewOpen && <ReviewDashboard scope={scope} scopeTitle={scopeTitle} onClose={() => setReviewOpen(false)} onChanged={refresh} onIdeaSelect={id => { setReviewOpen(false); void openIdea(id) }}/>}
     {dreamOpen && <DreamWorkspace ideaIds={dreamIdeaIds} ideas={allIdeas} projects={projects} onClose={() => setDreamOpen(false)} onRemove={id => setDreamIdeaIds(current => current.filter(item => item !== id))} onChanged={refresh} onIdeaSelect={id => { setDreamOpen(false); void openIdea(id) }} onOpenAgent={() => { setDreamOpen(false); setAgentContext(null) }}/>}
     <button className={`dream-dock ${dreamIdeaIds.length ? 'ready' : ''}`} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addDreamIdea(Number(event.dataTransfer.getData('application/x-ideaminer-idea'))) }} onClick={() => setDreamOpen(true)}><CloudMoon size={18}/><span>{dreamIdeaIds.length ? `${dreamIdeaIds.length} idea${dreamIdeaIds.length === 1 ? '' : 's'} ready to Dream` : 'Drag ideas here to Dream'}</span></button>
-    {stopped && <div className="shutdown-screen"><div className="shutdown-card"><div className="brand-mark"><Sprout size={25}/></div><p className="eyebrow">SHUTDOWN COMPLETE</p><h1>IdeaMiner has stopped.</h1><p>Your ideas are safely stored in SQLite. You can close this browser tab and double-click <code>start-ideaminer.bat</code> whenever you want to return.</p></div></div>}
+    {stopped && <div className="shutdown-screen"><div className="shutdown-card"><div className="brand-mark"><Sprout size={25}/></div><p className="eyebrow">SHUTDOWN COMPLETE</p><h1>Paper Lab has stopped.</h1><p>Your papers and ideas are safely stored in SQLite. You can close this browser tab and double-click <code>start-ideaminer.bat</code> whenever you want to return.</p></div></div>}
   </div>
 }

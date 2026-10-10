@@ -1,10 +1,10 @@
 @echo off
 setlocal
-title IdeaMiner Launcher
+title Paper Lab Launcher
 cd /d "%~dp0"
 
 echo.
-echo  IdeaMiner - local research idea manager
+echo  Paper Lab - deep paper analysis and idea synthesis
 echo  --------------------------------------
 echo.
 
@@ -44,8 +44,8 @@ call npm ci
 if errorlevel 1 goto setup_failed
 
 :launch
-echo  Starting IdeaMiner...
-start "IdeaMiner" /D "%~dp0" ".venv\Scripts\python.exe" launcher.py
+echo  Starting Paper Lab...
+start "Paper Lab" /D "%~dp0" ".venv\Scripts\python.exe" launcher.py
 exit /b 0
 
 :missing_python
@@ -64,7 +64,7 @@ goto failed
 
 :setup_failed
 echo.
-echo  ERROR: IdeaMiner setup did not finish successfully.
+echo  ERROR: Paper Lab setup did not finish successfully.
 echo  Review the messages above and see README.md troubleshooting.
 
 :failed

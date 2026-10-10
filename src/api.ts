@@ -66,8 +66,8 @@ export const api = {
   review: (params = new URLSearchParams()) => request<ReviewData>(`/review?${params}`),
   agentStatus: () => request<AgentStatus>('/agent/status'),
   discoverPapers: (params: URLSearchParams) => request<PaperDiscoveryResult>(`/papers/discover?${params}`),
-  paperContext: (params: URLSearchParams) => request<PaperScholarlyContext>(`/papers/context?${params}`),
-  enrichPaper: (data: { title: string; venue: string; abstract: string; topic: string; scholarly_context: string }) => request<PaperAutoEnrichment>('/papers/enrich', { method: 'POST', body: JSON.stringify(data) }),
+  paperContext: (params: URLSearchParams, signal?: AbortSignal) => request<PaperScholarlyContext>(`/papers/context?${params}`, { signal }),
+  enrichPaper: (data: { title: string; venue: string; abstract: string; topic: string; scholarly_context: string }, signal?: AbortSignal) => request<PaperAutoEnrichment>('/papers/enrich', { method: 'POST', body: JSON.stringify(data), signal }),
   configureAgent: (data: { provider: AgentProvider; api_key: string; model: string; base_url: string; reasoning_effort: ReasoningEffort; remember_api_key: boolean }) => request<AgentStatus>('/agent/config', { method: 'POST', body: JSON.stringify(data) }),
   activateAgentProvider: (provider: AgentProvider) => request<AgentStatus>(`/agent/activate/${provider}`, { method: 'POST' }),
   forgetAgentProfile: (provider: AgentProvider) => request<AgentStatus>(`/agent/config/${provider}`, { method: 'DELETE' }),
@@ -79,8 +79,10 @@ export const api = {
   detachFile: (ideaId: number, attachmentId: number) => request<void>(`/ideas/${ideaId}/attachments/${attachmentId}`, { method: 'DELETE' }),
   openAttachment: (id: number) => request<{ status: string }>(`/attachments/${id}/open`, { method: 'POST' }),
   revealAttachment: (id: number) => request<{ status: string }>(`/attachments/${id}/reveal`, { method: 'POST' }),
-  runAgent: (data: { prompt: string; mode: AgentMode; scope_type: 'all' | 'project' | 'group'; scope_id: number | null; idea_id: number | null; model: string; reasoning_effort: ReasoningEffort; web_search: boolean; attachment_ids: number[] }) =>
-    request<AgentRunResult>('/agent/runs', { method: 'POST', body: JSON.stringify(data) }),
+  runAgent: (data: { request_id?: string; prompt: string; mode: AgentMode; scope_type: 'all' | 'project' | 'group'; scope_id: number | null; idea_id: number | null; model: string; reasoning_effort: ReasoningEffort; max_output_tokens?: number; include_library_context?: boolean; web_search: boolean; attachment_ids: number[] }, signal?: AbortSignal) =>
+    request<AgentRunResult>('/agent/runs', { method: 'POST', body: JSON.stringify(data), signal }),
+  cancelAgentRun: (requestId: string) =>
+    request<{ cancelled: boolean }>(`/agent/runs/cancel/${encodeURIComponent(requestId)}`, { method: 'POST' }),
   dream: (data: { idea_ids: number[]; prompt: string; project_id: number; model: string }) =>
     request<AgentRunResult>('/dreams', { method: 'POST', body: JSON.stringify(data) }),
   saveAgentResult: (id: number, action: 'update_original' | 'create_child') =>

@@ -22,7 +22,7 @@ export function ImportDialog({ filename, preview, onClose, onImport }: {
         <p>{result.projects_created} projects, {result.groups_created} groups, and {result.relations_created} relations added.</p>
         <button className="button primary" onClick={onClose}>View imported ideas</button>
       </div> : <>
-        <div className="import-file"><FileJson size={22}/><div><strong>{filename}</strong><span>IdeaMiner export version {preview.version}</span></div></div>
+        <div className="import-file"><FileJson size={22}/><div><strong>{filename}</strong><span>Paper Lab export version {preview.version}</span></div></div>
         <div className="import-counts"><div><strong>{preview.counts.ideas}</strong><span>Topics</span></div><div><strong>{preview.counts.projects}</strong><span>Projects</span></div><div><strong>{preview.counts.groups}</strong><span>Groups</span></div><div><strong>{preview.counts.relations}</strong><span>Relations</span></div></div>
         {(preview.duplicate_topics > 0 || preview.project_conflicts.length > 0 || preview.group_conflicts.length > 0) && <div className="import-warning"><AlertTriangle size={17}/><span>{preview.duplicate_topics} duplicate topics, {preview.project_conflicts.length} matching projects, and {preview.group_conflicts.length} matching groups found.</span></div>}
         <label>When a topic already exists<select value={duplicates} onChange={event => setDuplicates(event.target.value as typeof duplicates)}><option value="skip">Skip the duplicate (recommended)</option><option value="copy">Create another copy</option><option value="update">Update the existing topic</option></select></label>

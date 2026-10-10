@@ -34,8 +34,8 @@ export function ProjectManager({ groups, onClose, onCreateProject, onCreateGroup
         <label>Project group<select value={groupId} onChange={e => setGroupId(e.target.value)}><option value="">No group</option>{groups.map(group => <option value={group.id} key={group.id}>{group.name}</option>)}</select></label>
         <label>Local files<select value={workspaceMode} onChange={e => { setWorkspaceMode(e.target.value as 'library' | 'linked' | 'managed'); setWorkspacePath('') }}><option value="library">Library only — no project folder</option><option value="linked">Link an existing folder</option><option value="managed">Create a managed project workspace</option></select></label>
         {workspaceMode !== 'library' && <div className="workspace-folder-field"><label>{workspaceMode === 'managed' ? 'Parent folder' : 'Existing folder'}<input required value={workspacePath} onChange={e => setWorkspacePath(e.target.value)} placeholder="C:\\Users\\you\\Research"/></label><button type="button" className="button secondary small" onClick={browseFolder}><FolderSearch size={14}/> Browse</button></div>}
-        {workspaceMode === 'managed' && <p className="workspace-help">IdeaMiner will create a new project-named folder here with a hidden <code>.ideaminer</code> area for managed copies and exports.</p>}
-        {workspaceMode === 'linked' && <p className="workspace-help">The existing folder stays under your control. IdeaMiner stores only links and never deletes its files.</p>}
+        {workspaceMode === 'managed' && <p className="workspace-help">Paper Lab will create a new project-named folder here with a hidden <code>.ideaminer</code> compatibility area for managed copies and exports.</p>}
+        {workspaceMode === 'linked' && <p className="workspace-help">The existing folder stays under your control. Paper Lab stores only links and never deletes its files.</p>}
         {error && <p className="workspace-error">{error}</p>}
         <button className="button primary" disabled={saving || (workspaceMode !== 'library' && !workspacePath.trim())}>Create project</button>
       </form>

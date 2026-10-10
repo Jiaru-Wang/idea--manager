@@ -78,6 +78,7 @@ class ImportRequest(ImportPreviewRequest):
 
 
 class AgentRunRequest(BaseModel):
+    request_id: str = Field(default="", max_length=64, pattern=r"^[A-Za-z0-9_-]*$")
     prompt: str = Field(min_length=1, max_length=24000)
     mode: Literal["explore", "elaborate", "critique", "connect", "synthesize"] = "explore"
     scope_type: Literal["all", "project", "group"] = "all"
@@ -85,6 +86,8 @@ class AgentRunRequest(BaseModel):
     idea_id: int | None = None
     model: str = Field(default="", max_length=100)
     reasoning_effort: ReasoningEffort = ""
+    max_output_tokens: int = Field(default=8192, ge=512, le=16384)
+    include_library_context: bool = True
     web_search: bool = False
     attachment_ids: list[int] = []
 

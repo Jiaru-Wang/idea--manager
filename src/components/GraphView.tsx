@@ -122,6 +122,7 @@ export function GraphView({ ideas, relations, onSelect }: { ideas: Idea[]; relat
   }
 
   return <div className="graph-view">
+    <div className="graph-scope-note"><strong>知识库关系图</strong><span>这里展示整篇论文或想法之间的联系；单篇论文内部的科研逻辑图请在 Focus 中打开该论文分析。</span></div>
     <header className="graph-toolbar">
       <span>{visibleIdeas.length}{focusId !== null ? ` of ${ideas.length}` : ''} {visibleIdeas.length === 1 ? 'idea' : 'ideas'} · {visibleRelations.length} {visibleRelations.length === 1 ? 'connection' : 'connections'} <small>Drag nodes to arrange · scroll to zoom</small></span>
       <div className="graph-tools"><label>Focus<select value={focusId ?? ''} onChange={event => setFocusId(event.target.value ? Number(event.target.value) : null)}><option value="">Entire scope</option>{ideas.map(idea => <option value={idea.id} key={idea.id}>{idea.title}</option>)}</select></label>{focusId !== null && <label>Depth<select value={depth} onChange={event => setDepth(Number(event.target.value))}><option value={1}>1 hop</option><option value={2}>2 hops</option><option value={3}>3 hops</option></select></label>}<button onClick={fitGraph} title="Fit all visible ideas in the window"><Maximize2 size={13}/> Fit</button><button onClick={relayoutGraph} title="Calculate a new layout"><RefreshCw size={13}/> Re-layout</button></div>
